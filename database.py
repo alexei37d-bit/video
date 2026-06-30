@@ -17,15 +17,9 @@ async def init_db():
             )
         ''')
         await db.commit()
-        
-        # На случай, если база данных уже была создана ранее, добавляем поле бонуса
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN last_bonus INTEGER DEFAULT 0")
-            await db.commit()
-        except aiosqlite.OperationalError:
-            pass
 
-async def get_user(user_id: int, username: str):
+async def get_or_create_user(user_id: int, username: str):
+    """Возвращает данные пользователя и флаг True, если он новый, или False, если старый"""
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT user_id, username, balance, total_lost, games_played, last_bonus FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
@@ -33,11 +27,12 @@ async def get_user(user_id: int, username: str):
                 if row[1] != username:
                     await db.execute("UPDATE users SET username = ? WHERE user_id = ?", (username, user_id))
                     await db.commit()
-                return {"user_id": row[0], "username": username, "balance": row[2], "total_lost": row[3], "games_played": row[4], "last_bonus": row[5]}
+                return {"user_id": row[0], "username": username, "balance": row[2], "total_lost": row[3], "games_played": row[4], "last_bonus": row[5]}, False
             
+            # Если юзера нет — это ПЕРВЫЙ СТАРТ. Выдаем 1000 коинов
             await db.execute("INSERT INTO users (user_id, username, balance) VALUES (?, ?, 1000)", (user_id, username))
             await db.commit()
-            return {"user_id": user_id, "username": username, "balance": 1000, "total_lost": 0, "games_played": 0, "last_bonus": 0}
+            return {"user_id": user_id, "username": username, "balance": 1000, "total_lost": 0, "games_played": 0, "last_bonus": 0}, True
 
 async def start_game_bet(user_id: int, bet_amount: int):
     async with aiosqlite.connect(DB_NAME) as db:
