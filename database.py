@@ -45,7 +45,6 @@ async def get_or_create_user(user_id: int, full_name: str):
             if row:
                 return dict(row), False
             else:
-                # 1000 Ucoin стартовый бонус
                 await db.execute(
                     "INSERT INTO users (user_id, username, balance) VALUES (?, ?, ?)",
                     (user_id, full_name, 1000)
@@ -124,7 +123,6 @@ async def use_promocode(user_id: int, promo_code: str):
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
         
-        # Проверяем, существует ли промокод
         async with db.execute("SELECT * FROM promocodes WHERE name = ?", (promo_code,)) as cursor:
             promo = await cursor.fetchone()
             if not promo:
@@ -133,12 +131,10 @@ async def use_promocode(user_id: int, promo_code: str):
             if promo['activations'] <= 0:
                 return "no_activations", 0
                 
-        # Проверяем, не активировал ли его юзер ранее
         async with db.execute("SELECT * FROM user_promos WHERE user_id = ? AND promo_name = ?", (user_id, promo_code)) as cursor:
             if await cursor.fetchone():
                 return "already_used", 0
                 
-        # Применяем промокод
         await db.execute("UPDATE promocodes SET activations = activations - 1 WHERE name = ?", (promo_code,))
         await db.execute("INSERT INTO user_promos (user_id, promo_name) VALUES (?, ?)", (user_id, promo_code))
         await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (promo['reward'], user_id))
@@ -147,7 +143,7 @@ async def use_promocode(user_id: int, promo_code: str):
         return "success", promo['reward']
 
 async def update_balance_admin(target_id: int, amount: int) -> bool:
-    """Начисление или списание баланса через админку (amount может быть отрицательным)"""
+    """Начисление или списание баланса через админку"""
     async with aiosqlite.connect(DB_FILE) as db:
         cursor = await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, target_id))
         await db.commit()
