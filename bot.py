@@ -248,7 +248,7 @@ def get_help_text():
         f"❌ <b>ОТМЕНА</b> — <b>Отменить созданную дуэль, пока никто не зашел</b>"
     )
 
-# --- СИСТЕМА ПЕРЕВОДОВ В ГРУППАХ (ИСПРАВЛЕН ПЕРЕХВАТ РЕПЛАЕВ) ---
+# --- СИСТЕМА ПЕРЕВОДОВ В ГРУППАХ ---
 @dp.message(
     F.chat.type.in_({"group", "supergroup"}), 
     F.reply_to_message,
@@ -280,7 +280,7 @@ async def handle_group_transfer(message: types.Message):
         f"💰 <b>Сумма:</b> <b>{format_short_amount(amount)} Ucoin</b>"
     )
 
-# --- ТОП ПО БАЛАНСАМ (ИСПРАВЛЕНО ОТОБРАЖЕНИЕ ИМЕН) ---
+# --- ТОП ПО БАЛАНСАМ ---
 @dp.message(lambda msg: msg.text and msg.text.lower() in ["топ", "/top", "топ 10"])
 async def cmd_top_users(message: types.Message):
     try:
@@ -1174,7 +1174,7 @@ async def handle_pvp_dice_rolls(message: types.Message):
     if duel['type'] != 'dice' or duel['status'] != 'playing': return
 
     user_id = message.from_user.id
-    val = message.dice.value
+    val = message.dice.value  # Бот успешно считывает, сколько выпало на кубике
 
     if user_id == duel['creator']:
         if duel['creator_roll'] is not None:
@@ -1191,31 +1191,56 @@ async def handle_pvp_dice_rolls(message: types.Message):
 
     # Если оба броска собраны — подводим результаты
     if duel['creator_roll'] is not None and duel['opponent_roll'] is not None:
+        # Меняем статус немедленно, чтобы второй параллельный поток прервался
+        if duel['status'] != 'playing':
+            return
+        duel['status'] = 'finished'
+        
         await asyncio.sleep(2.5)  # Даем время анимации кубика докрутиться
         
+        # Забираем сессию из ОЗУ сразу, защищаясь от дублирования выплат
         if found_duel_id not in DUELS: return
-        c_score, o_score, bet = duel['creator_roll'], duel['opponent_roll'], duel['bet']
+        duel_data = DUELS.pop(found_duel_id, None)
+        if not duel_data: return
         
-        c_name = html.escape(duel['creator_name'])
-        o_name = html.escape(duel['opponent_name'])
+        c_score = duel_data['creator_roll']
+        o_score = duel_data['opponent_roll']
+        bet = duel_data['bet']
         
+        c_name = html.escape(duel_data['creator_name'])
+        o_name = html.escape(duel_data['opponent_name'])
+        
+        # Форматирование и определение победителя по правилу "у кого больше — тот и вин"
         if c_score > o_score:
-            await database.win_game(duel['creator'], bet * 2)
-            res_text = f"🏆 В дуэли кубов побеждает <b>{c_name}</b>! ({c_score} vs {o_score})\n🎉 Выигрыш: <b>{format_short_amount(bet * 2)} Ucoin</b>"
+            await database.win_game(duel_data['creator'], bet * 2)
+            res_text = (
+                f"🏆 В дуэли кубов побеждает <b>{c_name} ({c_score})</b>!\n"
+                f"🎲 Броски игроков: <b>{c_name} ({c_score})</b> vs <b>{o_name} ({o_score})</b>\n"
+                f"📈 У кого выпало число больше — тот забрал весь банк!\n"
+                f"🎉 Выигрыш: <b>{format_short_amount(bet * 2)} Ucoin</b>"
+            )
         elif o_score > c_score:
-            await database.win_game(duel['opponent'], bet * 2)
-            res_text = f"🏆 В дуэли кубов побеждает <b>{o_name}</b>! ({o_score} vs {c_score})\n🎉 Выигрыш: <b>{format_short_amount(bet * 2)} Ucoin</b>"
+            await database.win_game(duel_data['opponent'], bet * 2)
+            res_text = (
+                f"🏆 В дуэли кубов побеждает <b>{o_name} ({o_score})</b>!\n"
+                f"🎲 Броски игроков: <b>{c_name} ({c_score})</b> vs <b>{o_name} ({o_score})</b>\n"
+                f"📈 У кого выпало число больше — тот забрал весь банк!\n"
+                f"🎉 Выигрыш: <b>{format_short_amount(bet * 2)} Ucoin</b>"
+            )
         else:
-            await database.win_game(duel['creator'], bet)
-            await database.win_game(duel['opponent'], bet)
-            res_text = f"🤝 <b>Ничья!</b> Выпало одинаково по <b>{c_score}</b>! Коины возвращены."
+            await database.win_game(duel_data['creator'], bet)
+            await database.win_game(duel_data['opponent'], bet)
+            res_text = (
+                f"🤝 <b>Ничья!</b> У игроков выпало одинаково по <b>{c_score}</b>!\n"
+                f"🎲 Броски игроков: <b>{c_name} ({c_score})</b> vs <b>{o_name} ({o_score})</b>\n"
+                f"💰 Ставки возвращены обоим участникам на баланс."
+            )
 
         await bot.send_message(
             chat_id=message.chat.id,
             text=f"📊 <b>ИТОГИ PvP ДУЭЛИ В КУБЫ:</b>\n━━━━━━━━━━━━━━━━━━━━━━\n{res_text}",
             reply_to_message_id=target_msg_id
         )
-        DUELS.pop(found_duel_id, None)
 
 
 # =====================================================================
