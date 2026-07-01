@@ -98,6 +98,18 @@ async def get_global_stats():
             total_balance = res[1] if res[1] else 0
             return {"total_users": total_users, "total_balance": total_balance}
 
+# --- НОВАЯ ФУНКЦИЯ ДЛЯ ТОПА ИГРОКОВ ---
+async def get_top_players(limit: int = 10):
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        # Сортируем по балансу сверху вниз и берем топ-10 (или сколько укажешь)
+        async with db.execute(
+            "SELECT username, balance FROM users ORDER BY balance DESC LIMIT ?", 
+            (limit,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
 async def create_promocode(name: str, reward: int, activations: int):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
