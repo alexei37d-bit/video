@@ -5,7 +5,7 @@ import random
 import time
 import logging
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.state import StatesGroup, State
@@ -20,24 +20,61 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
+ADMIN_ID = 7921743592
+
+# УВЕЛИЧЕННЫЕ ИКСЫ ДЛЯ БАШНИ (1 мина осталась прежней, остальные стали намного сочнее!)
 TOWER_MULTIPLIERS = {
     1: [1.15, 1.40, 1.75, 2.20, 2.80],
-    2: [1.50, 2.40, 3.80, 6.20, 10.00],
-    3: [2.30, 5.50, 13.00, 32.00, 80.00],
-    4: [4.60, 22.00, 100.00, 450.00, 2000.00]
+    2: [2.50, 5.80, 14.00, 35.00, 90.00],
+    3: [5.00, 22.00, 95.00, 450.00, 2500.00],
+    4: [15.00, 120.00, 1100.00, 9500.00, 85000.00]
 }
 
 class GameStates(StatesGroup):
     playing_tower = State()
     playing_mines = State()
 
+class AdminStates(StatesGroup):
+    waiting_for_give_id = State()
+    waiting_for_give_amount = State()
+    waiting_for_take_id = State()
+    waiting_for_take_amount = State()
+
+# Функция умной конвертации чисел (1к -> 1000, 1.11кк -> 1110000)
+def parse_amount(text: str, current_balance: int) -> int:
+    text = text.strip().lower()
+    if text in ["все", "вб", "vse", "vb"]:
+        return current_balance
+    
+    text = text.replace(" ", "").replace(",", ".")
+    multiplier = 1
+    
+    if "ккк" in text:
+        multiplier = 1_000_000_000
+        text = text.replace("ккк", "")
+    elif "кк" in text:
+        multiplier = 1_000_000
+        text = text.replace("кк", "")
+    elif "к" in text:
+        multiplier = 1_000
+        text = text.replace("к", "")
+        
+    try:
+        return int(float(text) * multiplier)
+    except ValueError:
+        return -1
+
+# УВЕЛИЧЕННЫЕ ИКСЫ ДЛЯ МИН (Для >1 мин коэффициент значительно увеличен)
 def get_mines_multiplier(total_mines, opened_count):
     if opened_count == 0: return 1.0
     try:
         ways_total = math.comb(25, opened_count)
         ways_safe = math.comb(25 - total_mines, opened_count)
         if ways_safe == 0: return 0
-        return round((ways_total / ways_safe) * 0.96, 2)
+        
+        # Если мина 1 — стандартный баланс, если больше — даем огромный бонус к иксам!
+        factor = 0.96 if total_mines == 1 else 1.35
+        return round((ways_total / ways_safe) * factor, 2)
     except Exception:
         return 1.0
 
@@ -49,73 +86,180 @@ def render_tower_text(current_level, bet, mines_count, next_win, current_win=0):
         else: rows.append(f"<b>Этаж {lvl}: ✅ ✅ ✅ ✅ ✅ (Пройден)</b>")
     return (
         f"🏰 <b>ИГРА: БАШНЯ</b>\n\n" + "\n".join(rows) + "\n\n"
-        f"💰 <b>Ставка:</b> <b>{bet} Ucoin</b>\n"
+        f"💰 <b>Ставка:</b> <b>{bet:,} Ucoin</b>\n"
         f"💣 <b>Мин на этаже:</b> <b>{mines_count}</b>\n"
-        f"💵 <b>Текущий куш:</b> <b>{current_win} Ucoin</b>\n"
-        f"📈 <b>Следующий шаг:</b> <b>+{next_win} Ucoin</b>"
+        f"💵 <b>Текущий куш:</b> <b>{current_win:,} Ucoin</b>\n"
+        f"📈 <b>Следующий шаг:</b> <b>+{next_win:,} Ucoin</b>"
+    ).replace(",", " ")
+
+# --- СИСТЕМА ПЕРЕВОДОВ В ГРУППАХ (дать 1000 / дать 1к) ---
+@dp.message(F.chat.type.in_({"group", "supergroup"}), F.reply_to_message)
+async def handle_group_transfer(message: types.Message):
+    if message.reply_to_message.from_user.is_bot:
+        return
+        
+    text = message.text.lower().strip() if message.text else ""
+    if not (text.startswith("дать ") or text.startswith("/give ")):
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2: return
+    
+    sender, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    amount = parse_amount(parts[1], sender['balance'])
+    
+    if amount <= 0:
+        await message.reply("<b>❌ Неверная сумма для перевода!</b>")
+        return
+        
+    if sender['balance'] < amount:
+        await message.reply(f"<b>❌ У вас нет такой суммы! Ваш баланс: {sender['balance']:,} Ucoin</b>".replace(",", " "))
+        return
+        
+    recipient, _ = await database.get_or_create_user(message.reply_to_message.from_user.id, message.reply_to_message.from_user.full_name)
+    
+    await database.make_transfer(sender['user_id'], recipient['user_id'], amount)
+    await message.reply(
+        f"<b>💸 ПЕРЕВОД ВЫПОЛНЕН!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Отправитель:</b> <b>{message.from_user.first_name}</b>\n"
+        f"👤 <b>Получатель:</b> <b>{message.reply_to_message.from_user.first_name}</b>\n"
+        f"💰 <b>Сумма:</b> <b>{amount:,} Ucoin</b>".replace(",", " ")
     )
 
-# Умный обработчик кнопки /start
+# --- СКРЫТАЯ АДМИНКА ДЛЯ ID 7921743592 ---
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return # ПОЛНЫЙ ИГНОР, сообщение не отправляется
+        
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📈 Статистика", callback_data="adm_stats")
+    builder.button(text="➕ Выдать баланс", callback_data="adm_give")
+    builder.button(text="➖ Снять баланс", callback_data="adm_take")
+    builder.adjust(1, 2)
+    
+    await message.answer("<b>👑 ПАНЕЛЬ АДМИНИСТРАТОРА КАЗИНО</b>", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data == "adm_stats")
+async def adm_view_stats(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
+    stats = await database.get_global_stats()
+    await callback.message.edit_text(
+        f"<b>📊 ГЛОБАЛЬНАЯ СТАТИСТИКА БОТА:</b>\n\n"
+        f"👥 <b>Всего игроков в базе:</b> <b>{stats['total_users']}</b>\n"
+        f"💰 <b>Всего Ucoin в обороте:</b> <b>{stats['total_balance']:,}</b>".replace(",", " ")
+    )
+
+@dp.callback_query(F.data == "adm_give")
+async def adm_give_init(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await callback.message.answer("<b>Введите Telegram ID игрока, которому хотите НАЧИСЛИТЬ баланс:</b>")
+    await state.set_state(AdminStates.waiting_for_give_id)
+
+@dp.message(AdminStates.waiting_for_give_id)
+async def adm_give_id(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        target_id = int(message.text)
+        await state.update_data(target_id=target_id)
+        await message.answer("<b>Какую сумму выдать? (Можно писать с сокращениями, например 5кк):</b>")
+        await state.set_state(AdminStates.waiting_for_give_amount)
+    except ValueError:
+        await message.answer("<b>ID должен состоять только из цифр! Попробуйте снова.</b>")
+
+@dp.message(AdminStates.waiting_for_give_amount)
+async def adm_give_amount(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    data = await state.get_data()
+    amount = parse_amount(message.text, 999_999_999) # Лимита для админа нет
+    
+    if amount <= 0:
+        await message.answer("<b>Неверный формат суммы! Настройка отменена.</b>")
+        await state.clear()
+        return
+        
+    success = await database.update_balance_admin(data['target_id'], amount)
+    if success:
+        await message.answer(f"<b>✅ Баланс пользователя <code>{data['target_id']}</code> успешно увеличен на +{amount:,} Ucoin!</b>".replace(",", " "))
+    else:
+        await message.answer("<b>❌ Пользователь с таким ID не найден в нашей базе данных!</b>")
+    await state.clear()
+
+@dp.callback_query(F.data == "adm_take")
+async def adm_take_init(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await callback.message.answer("<b>Введите Telegram ID игрока, у которого хотите СНЯТЬ баланс:</b>")
+    await state.set_state(AdminStates.waiting_for_take_id)
+
+@dp.message(AdminStates.waiting_for_take_id)
+async def adm_take_id(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        target_id = int(message.text)
+        await state.update_data(target_id=target_id)
+        await message.answer("<b>Какую сумму списать? (Можно использовать сокращения):</b>")
+        await state.set_state(AdminStates.waiting_for_take_amount)
+    except ValueError:
+        await message.answer("<b>ID должен быть числом!</b>")
+
+@dp.message(AdminStates.waiting_for_take_amount)
+async def adm_take_amount(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    data = await state.get_data()
+    amount = parse_amount(message.text, 999_999_999)
+    
+    if amount <= 0:
+        await message.answer("<b>Неверная сумма!</b>")
+        await state.clear()
+        return
+        
+    success = await database.update_balance_admin(data['target_id'], -amount)
+    if success:
+        await message.answer(f"<b>✅ С баланса пользователя <code>{data['target_id']}</code> успешно списано -{amount:,} Ucoin!</b>".replace(",", " "))
+    else:
+        await message.answer("<b>❌ Пользователь не найден!</b>")
+    await state.clear()
+
+
+# --- ОБЩИЕ ИГРОВЫЕ И ПОЛЬЗОВАТЕЛЬСКИЕ КОМАНДЫ ---
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     user, is_new = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    welcome_text = f"<b>🚀 С ВОЗВРАЩЕНИЕМ!</b>\n💰 Баланс: <b>{user['balance']:,} Ucoin</b>" if not is_new else f"<b>🚀 ПРИВЕТ! ТЕБЕ НАЧИСЛЕНО 1 000 СТАРТОВЫХ UCOIN!</b>"
     
-    if is_new:
-        # Текст ТОЛЬКО ДЛЯ ПЕРВОГО СТАРТА
-        await message.answer(
-            f"<b>🚀 ПРИВЕТ, {message.from_user.first_name.upper()}! ДОБРО ПОЖАЛОВАТЬ В КАЗИНО UCOIN!</b>\n\n"
-            f"<b>💰 ТЕБЕ НАЧИСЛЕНО 1000 UCOIN СТАРТОВОГО БАЛАНСА!</b>\n\n"
-            f"<b>📋 ПОЛНЫЙ СПИСОК КОМАНД БОТА:</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👉 <b>БАНК / БАЛАНС / Б</b> — <b>Посмотреть личный счет</b>\n"
-            f"👉 <b>ПРОФИЛЬ</b> — <b>Ваша статистика аккаунта</b>\n"
-            f"👉 <b>БОНУС</b> — <b>Получить от 300 до 10,000 Ucoin (Раз в сутки)</b>\n"
-            f"👉 <b>БАШНЯ [ставка] [мины]</b> — <b>Игра (от 1 до 4 мин)</b>\n"
-            f"👉 <b>МИНЫ [ставка] [мины]</b> — <b>Игра 5х5 (от 1 до 24 мин)</b>"
-        )
-    else:
-        # Текст ДЛЯ ВСЕХ ПОДРЯД ПОВТОРНЫХ НАЖАТИЙ /start
-        await message.answer(
-            f"<b>🚀 С ВОЗВРАЩЕНИЕМ, {message.from_user.first_name.upper()}!</b>\n"
-            f"💰 <b>Твой текущий баланс:</b> <b>{user['balance']} Ucoin</b>\n\n"
-            f"<b>📋 ВСЕ НАШИ КОМАНДЫ ДЛЯ ИГРЫ:</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👉 <b>БАНК / БАЛАНС / Б</b> — <b>Баланс кошелька</b>\n"
-            f"👉 <b>ПРОФИЛЬ</b> — <b>Посмотреть ID и статистику игр</b>\n"
-            f"👉 <b>БОНУС</b> — <b>Забрать ежедневную халяву</b>\n"
-            f"👉 <b>БАШНЯ [ставка] [мины]</b> — <b>Запустить Башню</b>\n"
-            f"👉 <b>МИНЫ [ставка] [мины]</b> — <b>Запустить Мины 5х5</b>"
-        )
+    await message.answer(
+        f"{welcome_text}\n\n"
+        f"<b>📋 ВСЕ НАШИ КОМАНДЫ:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👉 <b>БАНК / БАЛАНС / Б</b> — <b>Баланс кошелька</b>\n"
+        f"👉 <b>ПРОФИЛЬ</b> — <b>Статистика аккаунта</b>\n"
+        f"👉 <b>БОНУС</b> — <b>Ежедневная халява (до 10кк)</b>\n"
+        f"👉 <b>БАШНЯ [ставка] [мины]</b> — <b>Запустить Башню (мины от 1 до 4)</b>\n"
+        f"👉 <b>МИНЫ [ставка] [мины]</b> — <b>Запустить Мины 5х5 (мины от 1 до 24)</b>\n\n"
+        f"ℹ️ <i>Поддерживаются сокращения вроде: 10к, 1.5кк, все, вб. При игре в мины без указания количества мин, автоматически выставляется 1 мина!</i>"
+    )
 
 @dp.message(lambda msg: msg.text and msg.text.lower() in ["бонус", "/bonus"])
 async def get_daily_bonus(message: types.Message):
-    user = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
-    user_data = user[0] # Получаем сам словарь данных юзера
+    user, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
     current_time = int(time.time())
     cooldown = 24 * 60 * 60
     
-    if current_time - user_data['last_bonus'] < cooldown:
-        time_left = cooldown - (current_time - user_data['last_bonus'])
-        hours, minutes = time_left // 3600, (time_left % 3600) // 60
-        await message.answer(f"<b>⏳ ВЫ УЖЕ ЗАБИРАЛИ БОНУС!</b>\n<b>Приходите через: {hours} ч. и {minutes} мин.</b>")
+    if current_time - user['last_bonus'] < cooldown:
+        time_left = cooldown - (current_time - user['last_bonus'])
+        await message.answer(f"<b>⏳ ВЫ УЖЕ ЗАБИРАЛИ БОНУС! Приходите через: {time_left // 3600} ч. и {(time_left % 3600) // 60} мин.</b>")
         return
 
     bonus_amount = random.randint(300, 10000)
     await database.claim_bonus(message.from_user.id, bonus_amount)
-    await message.answer(
-        f"<b>🎁 ЕЖЕДНЕВНЫЙ БОНУС ПОЛУЧЕН!</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>🎉 Вы выиграли:</b> <b>+{bonus_amount} Ucoin</b>\n"
-        f"<b>💰 Текущий баланс:</b> <b>{user_data['balance'] + bonus_amount} Ucoin</b>"
-    )
+    await message.answer(f"<b>🎁 БОНУС ПОЛУЧЕН! 🎉 Вы выиграли: +{bonus_amount:,} Ucoin!</b>")
 
 @dp.message(lambda msg: msg.text and msg.text.lower() in ["баланс", "/balance", "б", "банк"])
 async def check_balance(message: types.Message):
     user, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
-    await message.answer(
-        f"<b>💰 Ваш баланс: {user['balance']} Ucoin</b>\n\n\n"
-        f"<b>🎮 Всего проигранно: {user['total_lost']} Ucoin</b>"
-    )
+    await message.answer(f"<b>💰 Ваш баланс: {user['balance']:,} Ucoin</b>\n\n🎮 Всего проиграно: {user['total_lost']:,} Ucoin".replace(",", " "))
 
 @dp.message(lambda msg: msg.text and msg.text.lower() in ["профиль", "/profile"])
 async def check_profile(message: types.Message):
@@ -125,36 +269,38 @@ async def check_profile(message: types.Message):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>📝 НИКНЕЙМ: {user['username'].upper()}</b>\n"
         f"<b>🆔 ТВОЙ ID: <code>{user['user_id']}</code></b>\n\n"
-        f"<b>💰 БАЛАНС: {user['balance']} Ucoin</b>\n"
+        f"<b>💰 БАЛАНС: {user['balance']:,} Ucoin</b>\n"
         f"<b>🎮 СЫГРАНО ИГР: {user['games_played']}</b>\n"
-        f"<b>📉 ВСЕГО ПРОИГРАНО: {user['total_lost']} Ucoin</b>"
+        f"<b>📉 ВСЕГО ПРОИГРАНО: {user['total_lost']:,} Ucoin</b>".replace(",", " ")
     )
 
-# --- МИНЫ ---
+# --- МОДЕРНИЗИРОВАННАЯ ИГРА МИНЫ ---
 @dp.message(lambda msg: msg.text and msg.text.lower().startswith("мины"))
 async def start_mines(message: types.Message, state: FSMContext):
     if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines]:
-        await message.answer("<b>❌ У вас уже открыта игра! Завершите её.</b>")
+        await message.answer("<b>❌ Завершите прошлую игру!</b>")
         return
 
     parts = message.text.split()
-    if len(parts) != 3:
-        await message.answer("<b>⚠️ НЕВЕРНЫЙ ФОРМАТ!</b>\nИспользуйте: <code>Мины [ставка] [мины]</code>")
-        return
-
-    try:
-        bet, mines_count = int(parts[1]), int(parts[2])
-    except ValueError:
-        await message.answer("<b>❌ Вводите только целые числа!</b>")
-        return
-
-    if bet <= 0 or not (1 <= mines_count <= 24):
-        await message.answer("<b>❌ Ставка больше 0, а мины строго от 1 до 24!</b>")
+    if len(parts) < 2:
+        await message.answer("<b>⚠️ Формат: <code>Мины [ставка] [мины]</code> (Пример: Мины вб или Мины 15к 3)</b>")
         return
 
     user, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    bet = parse_amount(parts[1], user['balance'])
+    
+    # Автоматическое определение 1 мины, если параметр опущен (например: мины вб / мины все)
+    mines_count = 1
+    if len(parts) == 3:
+        try: mines_count = int(parts[2])
+        except ValueError: pass
+
+    if bet <= 0 or not (1 <= mines_count <= 24):
+        await message.answer("<b>❌ Неверные параметры ставки или количества мин (от 1 до 24)!</b>")
+        return
+
     if user['balance'] < bet:
-        await message.answer(f"<b>❌ Недостаточно средств! Баланс: {user['balance']} Ucoin</b>")
+        await message.answer(f"<b>❌ Недостаточно средств! Баланс: {user['balance']:,} Ucoin</b>".replace(",", " "))
         return
 
     await database.start_game_bet(message.from_user.id, bet)
@@ -172,10 +318,9 @@ async def start_mines(message: types.Message, state: FSMContext):
 
     await message.answer(
         f"<b>💣 ИГРА: МИНЫ (Поле 5х5)</b>\n\n"
-        f"💵 <b>Ставка:</b> <b>{bet} Ucoin</b>\n"
+        f"💵 <b>Ставка:</b> <b>{bet:,} Ucoin</b>\n"
         f"💥 <b>Всего мин:</b> <b>{mines_count}</b>\n"
-        f"💎 <b>Открыто алмазов:</b> <b>0 / {25 - mines_count}</b>\n"
-        f"📈 <b>Множитель:</b> <b>1.0х (0 Ucoin)</b>",
+        f"📈 <b>Множитель:</b> <b>1.0х (0 Ucoin)</b>".replace(",", " "),
         reply_markup=builder.as_markup()
     )
 
@@ -194,12 +339,9 @@ async def process_mines_click(callback: types.CallbackQuery, state: FSMContext):
         await state.clear()
         builder = InlineKeyboardBuilder()
         for i in range(25):
-            if i == cell_idx: text = "💥"
-            elif grid[i]: text = "💣"
-            else: text = "💎"
-            builder.button(text=text, callback_data="void")
+            builder.button(text="💥" if i == cell_idx else ("💣" if grid[i] else "💎"), callback_data="void")
         builder.adjust(5)
-        await callback.message.edit_text(f"<b>💥 БУМ! ВЫ ПОДОРВАЛИСЬ!</b>\n━━━━━━━━━━━━━━━━━━━━\n📉 <b>Проиграно:</b> <b>{bet} Ucoin</b>", reply_markup=builder.as_markup())
+        await callback.message.edit_text(f"<b>💥 БУМ! ВЫ ПОДОРВАЛИСЬ!</b>\n📉 Проиграно: <b>{bet:,} Ucoin</b>".replace(",", " "), reply_markup=builder.as_markup())
         return
 
     opened_count += 1
@@ -213,22 +355,22 @@ async def process_mines_click(callback: types.CallbackQuery, state: FSMContext):
         builder = InlineKeyboardBuilder()
         for i in range(25): builder.button(text="💣" if grid[i] else "💎", callback_data="void")
         builder.adjust(5)
-        await callback.message.edit_text(f"<b>🏆 ЧИСТАЯ ПОБЕДА!</b>\n━━━━━━━━━━━━━━━━━━━━\n🎉 <b>Выигрыш:</b> <b>{current_win} Ucoin ({mult}x)!</b>", reply_markup=builder.as_markup())
+        await callback.message.edit_text(f"<b>🏆 ЧИСТАЯ ПОБЕДА! 🎉 Джекпот: {current_win:,} Ucoin ({mult}x)!</b>".replace(",", " "), reply_markup=builder.as_markup())
         return
 
     builder = InlineKeyboardBuilder()
     for i in range(25): builder.button(text="💎" if revealed[i] else "⬛", callback_data=f"mn_clk_{i}")
     next_mult = get_mines_multiplier(mines_count, opened_count + 1)
-    builder.button(text=f"💰 ЗАБРАТЬ {current_win} UCOIN", callback_data="mn_cashout")
+    builder.button(text=f"💰 ЗАБРАТЬ {current_win:,} UCOIN", callback_data="mn_cashout")
     builder.adjust(5, 5, 5, 5, 5, 1)
 
     await callback.message.edit_text(
         f"<b>💣 ИГРА: МИНЫ (Поле 5х5)</b>\n\n"
-        f"💵 <b>Ставка:</b> <b>{bet} Ucoin</b>\n"
+        f"💵 <b>Ставка:</b> <b>{bet:,} Ucoin</b>\n"
         f"💥 <b>Всего мин:</b> <b>{mines_count}</b>\n"
-        f"💎 <b>Открыто алмазов:</b> <b>{opened_count} / {25 - mines_count}</b>\n"
-        f"📈 <b>Множитель:</b> <b>{mult}х ({current_win} Ucoin)</b>\n"
-        f"🔮 <b>Следующий шаг:</b> <b>{next_mult}x</b>",
+        f"💎 <b>Алмазов:</b> <b>{opened_count} / {25 - mines_count}</b>\n"
+        f"📈 <b>Множитель:</b> <b>{mult}х ({current_win:,} Ucoin)</b>\n"
+        f"🔮 <b>Далее:</b> <b>{next_mult}x</b>".replace(",", " "),
         reply_markup=builder.as_markup()
     )
 
@@ -236,37 +378,39 @@ async def process_mines_click(callback: types.CallbackQuery, state: FSMContext):
 async def process_mines_cashout(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
-    opened_count, mines_count, bet = data['opened_count'], data['mines_count'], data['bet']
-    mult = get_mines_multiplier(mines_count, opened_count)
-    current_win = int(bet * mult)
+    mult = get_mines_multiplier(data['mines_count'], data['opened_count'])
+    current_win = int(data['bet'] * mult)
 
     await database.win_game(callback.from_user.id, current_win)
     await state.clear()
-    await callback.message.edit_text(f"<b>💰 КЭШАУТ!</b>\n━━━━━━━━━━━━━━━━━━━━\n💵 <b>Забрано:</b> <b>{current_win} Ucoin ({mult}x)</b>", reply_markup=None)
+    await callback.message.edit_text(f"<b>💰 КЭШАУТ! Забрано: {current_win:,} Ucoin ({mult}x)</b>".replace(",", " "), reply_markup=None)
 
-# --- БАШНЯ ---
+# --- МОДЕРНИЗИРОВАННАЯ ИГРА БАШНЯ ---
 @dp.message(lambda msg: msg.text and msg.text.lower().startswith("башня"))
 async def start_tower(message: types.Message, state: FSMContext):
     if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines]:
-        await message.answer("<b>❌ У вас уже идет игра!</b>")
+        await message.answer("<b>❌ Завершите активную игру!</b>")
         return
 
     parts = message.text.split()
-    if len(parts) != 3:
-        await message.answer("<b>⚠️ Формат: <code>Башня [ставка] [мины]</code></b>")
-        return
-
-    try:
-        bet, mines_count = int(parts[1]), int(parts[2])
-    except ValueError: return
-
-    if bet <= 0 or not (1 <= mines_count <= 4):
-        await message.answer("<b>❌ Мины в башне: от 1 до 4!</b>")
+    if len(parts) < 2:
+        await message.answer("<b>⚠️ Формат: <code>Башня [ставка] [мины]</code> (Пример: Башня все 2)</b>")
         return
 
     user, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    bet = parse_amount(parts[1], user['balance'])
+    
+    mines_count = 2 # По умолчанию 2 мины, если не введено
+    if len(parts) == 3:
+        try: mines_count = int(parts[2])
+        except ValueError: pass
+
+    if bet <= 0 or not (1 <= mines_count <= 4):
+        await message.answer("<b>❌ Мины в башне выставляются строго от 1 до 4!</b>")
+        return
+
     if user['balance'] < bet:
-        await message.answer("<b>❌ Недостаточно коинов!</b>")
+        await message.answer("<b>❌ Недостаточно Ucoin!</b>")
         return
 
     await database.start_game_bet(message.from_user.id, bet)
@@ -294,7 +438,7 @@ async def tower_turn(callback: types.CallbackQuery, state: FSMContext):
     if current_mines[chosen_cell]:
         await database.lose_game(callback.from_user.id, bet)
         await state.clear()
-        await callback.message.edit_text(f"<b>💥 МИНА НА {current_level} ЭТАЖЕ!</b>\n📉 Проиграно {bet} Ucoin.", reply_markup=None)
+        await callback.message.edit_text(f"<b>💥 МИНА НА {current_level}-М ЭТАЖЕ!</b>\n📉 Потеряно: {bet:,} Ucoin.".replace(",", " "), reply_markup=None)
         return
 
     current_win = int(bet * TOWER_MULTIPLIERS[mines_count][current_level - 1])
@@ -302,7 +446,7 @@ async def tower_turn(callback: types.CallbackQuery, state: FSMContext):
     if current_level == 5:
         await database.win_game(callback.from_user.id, current_win)
         await state.clear()
-        await callback.message.edit_text(f"<b>🏆 БАШНЯ ПОКОРЕНА! Выигрыш: {current_win} Ucoin!</b>", reply_markup=None)
+        await callback.message.edit_text(f"<b>🏆 БАШНЯ СНЕСЕНА! Бешеный выигрыш: {current_win:,} Ucoin!</b>".replace(",", " "), reply_markup=None)
         return
 
     next_level = current_level + 1
@@ -314,7 +458,7 @@ async def tower_turn(callback: types.CallbackQuery, state: FSMContext):
 
     builder = InlineKeyboardBuilder()
     for i in range(1, 6): builder.button(text=f"📦 Клетка {i}", callback_data=f"tw_step_{i-1}")
-    builder.button(text=f"💰 ЗАБРАТЬ {current_win} UCOIN", callback_data="tw_cashout")
+    builder.button(text=f"💰 ЗАБРАТЬ {current_win:,} UCOIN", callback_data="tw_cashout")
     builder.adjust(5, 1)
 
     text = render_tower_text(current_level=next_level, bet=bet, mines_count=mines_count, next_win=next_win, current_win=current_win)
@@ -325,21 +469,17 @@ async def tower_cashout(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
     await database.win_game(callback.from_user.id, data.get('accumulated_win', 0))
-    await callback.message.edit_text(f"<b>💰 ЗАБРАНО {data.get('accumulated_win', 0)} UCOIN!</b>", reply_markup=None)
+    await callback.message.edit_text(f"<b>💰 ЗАБРАНО {data.get('accumulated_win', 0):,} UCOIN!</b>".replace(",", " "), reply_markup=None)
     await state.clear()
 
 async def main():
     await database.init_db()
-    
-    # Регистрируем меню команд прямо внутри Telegram
     await bot.set_my_commands([
-        types.BotCommand(command="start", description="Перезапустить бота / Инфо"),
-        types.BotCommand(command="balance", description="Посмотреть баланс"),
+        types.BotCommand(command="start", description="Главное меню"),
+        types.BotCommand(command="balance", description="Мой баланс"),
         types.BotCommand(command="profile", description="Мой профиль"),
-        types.BotCommand(command="bonus", description="Получить ежедневный бонус"),
+        types.BotCommand(command="bonus", description="Взять бонус"),
     ])
-    
-    print("Супер-казино успешно запущено!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
