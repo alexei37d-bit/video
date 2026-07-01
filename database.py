@@ -5,9 +5,7 @@ import time
 DB_FILE = "casino_database.db"
 
 async def init_db():
-    """Создает таблицы в файле базы данных, если их еще нет"""
     async with aiosqlite.connect(DB_FILE) as db:
-        # Таблица пользователей
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -18,7 +16,6 @@ async def init_db():
                 last_bonus INTEGER DEFAULT 0
             )
         """)
-        # Таблица промокодов
         await db.execute("""
             CREATE TABLE IF NOT EXISTS promocodes (
                 name TEXT PRIMARY KEY,
@@ -26,7 +23,6 @@ async def init_db():
                 activations INTEGER
             )
         """)
-        # Таблица для отслеживания кто уже активировал промокод
         await db.execute("""
             CREATE TABLE IF NOT EXISTS user_promos (
                 user_id INTEGER,
@@ -37,7 +33,6 @@ async def init_db():
         await db.commit()
 
 async def get_or_create_user(user_id: int, full_name: str):
-    """Ищет игрока или создает его с балансом 1к, если он зашел впервые"""
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
@@ -60,14 +55,12 @@ async def get_or_create_user(user_id: int, full_name: str):
                 }, True
 
 async def make_transfer(sender_id: int, recipient_id: int, amount: int):
-    """Перевод коинов между игроками"""
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, sender_id))
         await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, recipient_id))
         await db.commit()
 
 async def claim_bonus(user_id: int, bonus_amount: int):
-    """Выдача ежедневного бонуса"""
     async with aiosqlite.connect(DB_FILE) as db:
         current_time = int(time.time())
         await db.execute(
@@ -77,13 +70,11 @@ async def claim_bonus(user_id: int, bonus_amount: int):
         await db.commit()
 
 async def start_game_bet(user_id: int, bet: int):
-    """Списание ставки в начале игры"""
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (bet, user_id))
         await db.commit()
 
 async def lose_game(user_id: int, bet: int):
-    """Обновление статистики при проигрыше"""
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
             "UPDATE users SET games_played = games_played + 1, total_lost = total_lost + ? WHERE user_id = ?",
@@ -92,7 +83,6 @@ async def lose_game(user_id: int, bet: int):
         await db.commit()
 
 async def win_game(user_id: int, current_win: int):
-    """Начисление выигрыша и обновление статистики"""
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
             "UPDATE users SET balance = balance + ?, games_played = games_played + 1 WHERE user_id = ?",
@@ -101,7 +91,6 @@ async def win_game(user_id: int, current_win: int):
         await db.commit()
 
 async def get_global_stats():
-    """Статистика для админ-панели"""
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT COUNT(*), SUM(balance) FROM users") as cursor:
             res = await cursor.fetchone()
@@ -110,7 +99,6 @@ async def get_global_stats():
             return {"total_users": total_users, "total_balance": total_balance}
 
 async def create_promocode(name: str, reward: int, activations: int):
-    """Создание промокода админом"""
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
             "INSERT OR REPLACE INTO promocodes (name, reward, activations) VALUES (?, ?, ?)",
@@ -119,7 +107,6 @@ async def create_promocode(name: str, reward: int, activations: int):
         await db.commit()
 
 async def use_promocode(user_id: int, promo_code: str):
-    """Активация промокода пользователем"""
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
         
@@ -143,7 +130,6 @@ async def use_promocode(user_id: int, promo_code: str):
         return "success", promo['reward']
 
 async def update_balance_admin(target_id: int, amount: int) -> bool:
-    """Начисление или списание баланса через админку"""
     async with aiosqlite.connect(DB_FILE) as db:
         cursor = await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, target_id))
         await db.commit()
