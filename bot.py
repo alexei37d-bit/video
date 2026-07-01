@@ -23,6 +23,7 @@ bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseM
 dp = Dispatcher()
 
 ADMIN_ID = 7921743592
+MAX_DB_INT = 9223372036854775807  # Физический лимит BIGINT для баз данных (Защита от OverflowError)
 
 TOWER_MULTIPLIERS = {
     1: [1.15, 1.40, 1.75, 2.20, 2.80],
@@ -109,7 +110,7 @@ class SubscriptionMiddleware(BaseMiddleware):
 def parse_amount(text: str, current_balance: int) -> int:
     text = text.strip().lower()
     if text in ["все", "вб", "vse", "vb"]:
-        return current_balance
+        return int(current_balance)
     
     text = text.replace(" ", "").replace(",", ".")
     
@@ -121,20 +122,28 @@ def parse_amount(text: str, current_balance: int) -> int:
     multiplier = 1000 ** k_count
         
     try:
-        # Использование Decimal защищает от OverflowError при вводе гигантских чисел
         val = Decimal(text) * Decimal(multiplier)
-        return int(val)
+        final_val = int(val)
+        
+        # Если админ ввел число больше лимита БД, плавно срезаем до максимума вместо падения
+        if final_val > MAX_DB_INT:
+            return MAX_DB_INT
+        return final_val
     except (ValueError, InvalidOperation):
         return -1
 
 def format_short_amount(amount: int) -> str:
+    try:
+        amount = int(amount)
+    except (ValueError, TypeError):
+        return "0"
+        
     is_negative = amount < 0
     abs_amount = abs(amount)
     
     if abs_amount == 0:
         return "0"
         
-    # Динамические суффиксы с огромным запасом (до 50 уровней «к»)
     suffixes = [""] + ["к" * i for i in range(1, 51)]
     
     tier = 0
@@ -147,9 +156,13 @@ def format_short_amount(amount: int) -> str:
     if tier == 0:
         res = str(abs_amount)
     else:
-        divisor = 1000 ** tier
-        val = abs_amount / divisor
-        res = f"{int(val) if val.is_integer() else round(val, 2)}{suffixes[tier]}"
+        # Защита от переполнения float при делении гигантских чисел
+        divisor = Decimal(1000 ** tier)
+        val = Decimal(abs_amount) / divisor
+        if val == val.to_integral_value():
+            res = f"{val:.0f}{suffixes[tier]}"
+        else:
+            res = f"{val:.2f}".rstrip('0').rstrip('.') + suffixes[tier]
         
     return f"-{res}" if is_negative else res
 
@@ -373,7 +386,7 @@ async def adm_give_id(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     try:
         await state.update_data(target_id=int(message.text))
-        await message.answer("<b>Какую сумму выдать? (Ограничений нет, можно хоть 100кккккккк):</b>")
+        await message.answer("<b>Какую сумму выдать? (Ограничений нет, можно написать хоть космическое число):</b>")
         await state.set_state(AdminStates.waiting_for_give_amount)
     except ValueError: await message.answer("ID должен состоять из цифр!")
 
@@ -383,8 +396,7 @@ async def adm_give_amount(message: types.Message, state: FSMContext):
     data = await state.get_data()
     target_id = data['target_id']
     
-    # Передаем максимальный лимит для макроса "все", если админ решит написать его при выдаче
-    amount = parse_amount(message.text, 9223372036854775807)
+    amount = parse_amount(message.text, MAX_DB_INT)
     if amount <= 0:
         await message.answer("Ошибка в изменении.")
         await state.clear()
@@ -416,7 +428,6 @@ async def adm_take_amount(message: types.Message, state: FSMContext):
     data = await state.get_data()
     target_id = data['target_id']
     
-    # Динамически получаем текущий баланс жертвы из БД, чтобы макрос "все" списал ровно его подчистую
     target_user, _ = await database.get_or_create_user(target_id, "Игрок")
     
     amount = parse_amount(message.text, target_user['balance'])
@@ -1072,7 +1083,7 @@ async def blackjack_stop_callback(callback: types.CallbackQuery, state: FSMConte
 
     await state.clear()
     await callback.message.edit_text(
-        f"<b>🎌 ФИНАЛЬНЫЙ СЧЕТ 21 ОЧКО</b>\n"
+        f"<b>👑 ФИНАЛЬНЫЙ СЧЕТ 21 ОЧКО</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🫵 <b>Ваши очки:</b> {player_score} — Рука: {', '.join(player_cards)}\n"
         f"🤖 <b>Очки дилера:</b> {dealer_score} — Рука: {', '.join(dealer_cards)}\n"
