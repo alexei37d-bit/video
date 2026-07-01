@@ -26,9 +26,11 @@ dp = Dispatcher()
 ADMIN_ID = 7921743592
 MAX_DB_INT = 9223372036854775807  # Физический лимит BIGINT для баз данных
 
-# --- БЫСТРОЕ ХРАНИЛИЩЕ ДЛЯ ПАРАЛЛЕЛЬНЫХ ИГР (БЕЗ ЛАГОВ И БЛОКИРОВОК) ---
-SOLO_GAMES = {}  # Ключ: (user_id, game_type) -> данные игры
-DUELS = {}       # Ключ: уникальный токен дуэли (int) -> данные дуэли
+# --- БЫСТРОЕ ХРАНИЛИЩЕ ДЛЯ ПАРАЛЛЕЛЬНЫХ ИГР, ЧЕКОВ И ИСТОРИИ ---
+SOLO_GAMES = {}    # Ключ: (user_id, game_type) -> данные игры
+DUELS = {}         # Ключ: уникальный токен дуэли (int) -> данные дуэли
+CHECKS = {}        # Ключ: уникальный токен чека (str) -> данные чека
+GAME_HISTORY = {}  # Ключ: user_id -> список сыгранных игр
 
 TOWER_MULTIPLIERS = {
     1: [1.15, 1.40, 1.75, 2.20, 2.80],
@@ -52,6 +54,15 @@ class AdminStates(StatesGroup):
     waiting_for_promo_name = State()
     waiting_for_promo_reward = State()
     waiting_for_promo_activations = State()
+
+class CheckStates(StatesGroup):
+    waiting_for_activations = State()
+    waiting_for_reward = State()
+    waiting_for_description = State()
+    waiting_for_password = State()
+
+class CheckActivationStates(StatesGroup):
+    waiting_for_password = State()
 
 # --- МИДЛВАРЬ ДЛЯ КАТЕГОРИЧЕСКОЙ ПРОВЕРКИ ПОДПИСКИ ---
 class SubscriptionMiddleware(BaseMiddleware):
@@ -109,6 +120,8 @@ def parse_amount(text: str, current_balance: int) -> int:
     text = text.strip().lower()
     if text in ["все", "вб", "vse", "vb"]:
         return int(current_balance)
+    if text in ["пол", "полбаланса", "пол баланса", "pol", "half"]:
+        return int(current_balance // 2)
     
     text = text.replace(" ", "").replace(",", ".")
     
@@ -157,6 +170,17 @@ def format_short_amount(amount: int) -> str:
             res = f"{val:.2f}".rstrip('0').rstrip('.') + suffixes[tier]
         
     return f"-{res}" if is_negative else res
+
+def add_game_history(user_id: int, game_name: str, amount: int, status: str):
+    if user_id not in GAME_HISTORY:
+        GAME_HISTORY[user_id] = []
+    current_time = time.strftime("%d.%m %H:%M")
+    GAME_HISTORY[user_id].append({
+        'game': game_name,
+        'amount': amount,
+        'status': status,
+        'time': current_time
+    })
 
 def get_mines_multiplier(total_mines, opened_count):
     if opened_count == 0: return 1.0
@@ -234,6 +258,9 @@ def get_help_text():
         f"👉 <b>БАНК / БАЛАНС / Б</b> — <b>Баланс кошелька</b>\n"
         f"👉 <b>ПРОФИЛЬ</b> — <b>Статистика аккаунта</b>\n"
         f"👉 <b>ТОП / /top</b> — <b>Топ-10 богачей бота</b> 🏆\n"
+        f"👉 <b>ИГРЫ / /game</b> — <b>Меню со всеми играми</b> 🎮\n"
+        f"👉 <b>ИСТОРИЯ / /history</b> — <b>История твоих игр (с перелистыванием)</b> 📋\n"
+        f"👉 <b>ЧЕК / /check</b> — <b>Создать/Посмотреть свои чеки (ТОЛЬКО В ЛС)</b> 🎫\n"
         f"👉 <b>БОНУС</b> — <b>Ежедневная халява (до 10кк)</b>\n"
         f"👉 <b>ПРОМО [код]</b> — <b>Активировать промокод</b>\n"
         f"👉 <b>ЗОЛОТО [ставка]</b> — <b>Золото 50/50 (10 уровней)</b> 🌟\n"
@@ -244,9 +271,253 @@ def get_help_text():
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚔️ <b>PvP ДУЭЛИ (В ГРУППАХ):</b>\n"
         f"👉 <b>Кн [ставка]</b> — <b>Дуэль в Крестики-Нолики</b> ❌⭕\n"
-        f"👉 <b>Куб [ставка]</b> — <b>Дуэль на Кубиках (через Reply 🎲)</b> 🎲\n"
         f"❌ <b>ОТМЕНА</b> — <b>Отменить созданную дуэль, пока никто не зашел</b>"
     )
+
+# --- СПИСОК ИГР ---
+@dp.message(lambda msg: msg.text and msg.text.lower() in ["игры", "/game"])
+async def cmd_all_games(message: types.Message):
+    games_text = (
+        f"🎮 <b>ИГРОВЫЕ РЕЖИМЫ КАЗИНО:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌟 <b>ЗОЛОТО</b> — Напиши <code>Золото [ставка]</code> (Угадывай ячейки, до х1024)\n"
+        f"🏰 <b>БАШНЯ</b> — Напиши <code>Башню [ставка] [мины]</code> (Поднимайся по этажам)\n"
+        f"💣 <b>МИНЫ</b> — Напиши <code>Мины [ставка] [мины]</code> (Поле 5х5, ищи алмазы)\n"
+        f"🃏 <b>21 ОЧКО</b> — Напиши <code>21 [ставка]</code> (Классический Блэкджек с дилером)\n"
+        f"🚀 <b>КРАШ</b> — Напиши <code>Краш [ставка] [икс]</code> (Успей забрать до взрыва ракеты)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚔️ <b>PvP РЕЖИМЫ (ДЛЯ БЕСЕД):</b>\n"
+        f"❌⭕ <b>КРЕСТИКИ-НОЛИКИ</b> — Напиши <code>Кн [ставка]</code> в группе для дуэли"
+    )
+    await message.answer(games_text)
+
+# --- ИСТОРИЯ ИГР С ПАГИНАЦИЕЙ ---
+@dp.message(lambda msg: msg.text and msg.text.lower() in ["история", "история игр", "/history"])
+async def cmd_history(message: types.Message):
+    await show_history_page(message, message.from_user.id, page=0)
+
+async def show_history_page(event, user_id: int, page: int):
+    history = GAME_HISTORY.get(user_id, [])
+    if not history:
+        text = "<b>📋 Твоя история игр пока пуста! Сделай свою первую ставку.</b>"
+        if isinstance(event, types.Message):
+            await event.answer(text)
+        else:
+            await event.message.edit_text(text)
+        return
+
+    per_page = 5
+    total_pages = math.ceil(len(history) / per_page)
+    if page < 0: page = 0
+    if page >= total_pages: page = total_pages - 1
+
+    start_idx = page * per_page
+    end_idx = start_idx + per_page
+    current_items = history[::-1][start_idx:end_idx]  # Свежие игры в начале
+
+    text = f"📋 <b>ИСТОРИЯ ТВОИХ ИГР (Страница {page + 1}/{total_pages}):</b>\n"
+    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    for item in current_items:
+        text += f"⏱ <code>{item['time']}</code> | 🕹 <b>{item['game']}</b>: <code>{item['amount']}</code> Ucoin ({item['status']})\n"
+
+    builder = InlineKeyboardBuilder()
+    if page > 0:
+        builder.button(text="⬅️ Назад", callback_data=f"hist_{page - 1}_{user_id}")
+    if page < total_pages - 1:
+        builder.button(text="Вперед ➡️", callback_data=f"hist_{page + 1}_{user_id}")
+    builder.adjust(2)
+
+    if isinstance(event, types.Message):
+        await event.answer(text, reply_markup=builder.as_markup())
+    else:
+        await event.message.edit_text(text, reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data.startswith("hist_"))
+async def process_history_pagination(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    page = int(parts[1])
+    user_id = int(parts[2])
+    if callback.from_user.id != user_id:
+        await callback.answer("❌ Это не твоя история игр!", show_alert=True)
+        return
+    await callback.answer()
+    await show_history_page(callback, user_id, page)
+
+
+# --- СУПЕР СИСТЕМА ЧЕКОВ (ТОЛЬКО В ЛС) ---
+@dp.message(lambda msg: msg.text and (msg.text.lower().startswith("чек") or msg.text.lower().startswith("/check")))
+async def cmd_check_router(message: types.Message):
+    if message.chat.type != "private":
+        bot_info = await message.bot.get_me()
+        await message.reply(
+            f"<b>⚠️ Эта команда доступна только в ЛС с ботом!</b>\n"
+            f"👉 <a href='https://t.me/{bot_info.username}?start=check_menu'>НАЖМИ СЮДА ЧТОБЫ ПЕРЕЙТИ</a>"
+        )
+        return
+    await send_check_main_menu(message)
+
+async def send_check_main_menu(event):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Создать чек", callback_data="chk_create_init")
+    builder.button(text="🗂 Мои чеки", callback_data="chk_my_list")
+    builder.adjust(1, 1)
+    
+    text = "🎫 <b>МЕНЮ ДЕНЕЖНЫХ ЧЕКОВ</b>\n\nЗдесь ты можешь создать чек на определенную сумму Ucoin с паролем или без, настроить количество активаций и раздать ссылку друзьям!"
+    if isinstance(event, types.Message):
+        await event.answer(text, reply_markup=builder.as_markup())
+    else:
+        await event.message.edit_text(text, reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data == "chk_create_init")
+async def init_check_creation(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.answer("✏️ <b>Введите количество активаций чека (сколько человек смогут его получить):</b>")
+    await state.set_state(CheckStates.waiting_for_activations)
+
+@dp.message(CheckStates.waiting_for_activations)
+async def process_chk_activations(message: types.Message, state: FSMContext):
+    try:
+        activations = int(message.text)
+        if activations <= 0: raise ValueError
+    except ValueError:
+        await message.answer("❌ Количество активаций должно быть целым числом больше нуля! Попробуйте снова:")
+        return
+    await state.update_data(activations=activations)
+    await message.answer("💰 <b>Введите сумму Ucoin за 1 активацию (например: 10к, 500, 1кк):</b>")
+    await state.set_state(CheckStates.waiting_for_reward)
+
+@dp.message(CheckStates.waiting_for_reward)
+async def process_chk_reward(message: types.Message, state: FSMContext):
+    user, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    data = await state.get_data()
+    activations = data['activations']
+    
+    reward = parse_amount(message.text, user['balance'])
+    if reward <= 0:
+        await message.answer("❌ Неверный формат суммы! Введите корректную сумму:")
+        return
+        
+    total_cost = reward * activations
+    if user['balance'] < total_cost:
+        await message.answer(f"❌ <b>Недостаточно баланса!</b>\nДля создания требуется: {format_short_amount(total_cost)} Ucoin\nВаш баланс: {format_short_amount(user['balance'])} Ucoin.\n\nСоздание отменено.")
+        await state.clear()
+        return
+
+    await state.update_data(reward=reward, total_cost=total_cost)
+    await message.answer("📝 <b>Введите описание чека (или напишите 'нет', если описание не нужно):</b>")
+    await state.set_state(CheckStates.waiting_for_description)
+
+@dp.message(CheckStates.waiting_for_description)
+async def process_chk_description(message: types.Message, state: FSMContext):
+    desc = message.text.strip()
+    if desc.lower() == 'нет': desc = "Отсутствует"
+    await state.update_data(description=desc)
+    await message.answer("🔒 <b>Введите пароль для чека (или напишите 'нет', если чек будет без пароля):</b>")
+    await state.set_state(CheckStates.waiting_for_password)
+
+@dp.message(CheckStates.waiting_for_password)
+async def process_chk_password(message: types.Message, state: FSMContext):
+    password = message.text.strip()
+    if password.lower() == 'нет': password = None
+    
+    data = await state.get_data()
+    activations = data['activations']
+    reward = data['reward']
+    total_cost = data['total_cost']
+    description = data['description']
+    
+    # Повторная проверка баланса перед непосредственным списанием
+    user, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    if user['balance'] < total_cost:
+        await message.answer("❌ Баланс изменился, недостаточно средств!")
+        await state.clear()
+        return
+
+    # Списываем баланс создателя сразу целиком
+    await database.start_game_bet(message.from_user.id, total_cost)
+    
+    # Генерация случайного буквенно-цифрового токена чека
+    allowed_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    token = "".join(random.choices(allowed_chars, k=12))
+    while token in CHECKS:
+        token = "".join(random.choices(allowed_chars, k=12))
+
+    CHECKS[token] = {
+        'creator_id': message.from_user.id,
+        'creator_name': message.from_user.full_name,
+        'activations': activations,
+        'initial_activations': activations,
+        'reward': reward,
+        'description': description,
+        'password': password,
+        'activated_users': []
+    }
+    
+    bot_info = await message.bot.get_me()
+    check_link = f"https://t.me/{bot_info.username}?start=CHECK_{token}"
+    
+    await message.answer(
+        f"<b>🎫 ЧЕК УСПЕШНО СОЗДАН!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>Описание:</b> {html.escape(description)}\n"
+        f"💰 <b>За 1 активацию:</b> {format_short_amount(reward)} Ucoin\n"
+        f"👥 <b>Всего активаций:</b> {activations} шт.\n"
+        f"🔒 <b>Пароль:</b> {'<code>' + html.escape(password) + '</code>' if password else '❌ Нет'}\n"
+        f"📉 <b>С вашего баланса списано:</b> {format_short_amount(total_cost)} Ucoin\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 <b>Ссылка на активацию (кликни для копирования):</b>\n"
+        f"<code>{check_link}</code>"
+    )
+    await state.clear()
+
+@dp.callback_query(F.data == "chk_my_list")
+async def view_my_checks(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    my_checks = {k: v for k, v in CHECKS.items() if v['creator_id'] == user_id}
+    
+    if not my_checks:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ Назад", callback_data="chk_back_main")
+        await callback.message.edit_text("<b>📭 У вас нет активных чеков в данный момент!</b>", reply_markup=builder.as_markup())
+        return
+
+    text = "🗂 <b>ВАШИ АКТИВНЫЕ ЧЕКИ:</b>\n"
+    text += "<i>Вы можете удалить чек, и оставшаяся сумма вернется вам на баланс.</i>\n\n"
+    
+    builder = InlineKeyboardBuilder()
+    for token, chk in my_checks.items():
+        text += f"🎫 <b>Код:</b> <code>{token}</code>\n💰 {format_short_amount(chk['reward'])}/акт. | Осталось: {chk['activations']} из {chk['initial_activations']}\n📝 Опис: {chk['description']}\n\n"
+        builder.button(text=f"❌ Удалить {token}", callback_data=f"chk_del_{token}")
+        
+    builder.button(text="⬅️ Назад в меню", callback_data="chk_back_main")
+    builder.adjust(1)
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data.startswith("chk_del_"))
+async def delete_check_handler(callback: types.CallbackQuery):
+    token = callback.data.split("_")[2]
+    if token not in CHECKS:
+        await callback.answer("❌ Чек не найден!", show_alert=True)
+        return
+        
+    chk = CHECKS[token]
+    if chk['creator_id'] != callback.from_user.id:
+        await callback.answer("❌ Это не ваш чек!", show_alert=True)
+        return
+        
+    refund_amount = chk['activations'] * chk['reward']
+    if refund_amount > 0:
+        await database.win_game(callback.from_user.id, refund_amount)
+        
+    CHECKS.pop(token)
+    await callback.answer(f"✅ Чек удален. Возвращено: {format_short_amount(refund_amount)} Ucoin", show_alert=True)
+    await view_my_checks(callback)
+
+@dp.callback_query(F.data == "chk_back_main")
+async def back_to_check_menu(callback: types.CallbackQuery):
+    await callback.answer()
+    await send_check_main_menu(callback)
+
 
 # --- СИСТЕМА ПЕРЕВОДОВ В ГРУППАХ ---
 @dp.message(
@@ -280,12 +551,12 @@ async def handle_group_transfer(message: types.Message):
         f"💰 <b>Сумма:</b> <b>{format_short_amount(amount)} Ucoin</b>"
     )
 
-# --- ТОП ПО БАЛАНСАМ ---
+# --- ТОП ПО БАЛАНСАМ (РЕАЛЬНЫЙ ТОП-10) ---
 @dp.message(lambda msg: msg.text and msg.text.lower() in ["топ", "/top", "топ 10"])
 async def cmd_top_users(message: types.Message):
     try:
         top_list = await database.get_top_users(limit=10)
-    except AttributeError:
+    except Exception:
         top_list = []
 
     if not top_list:
@@ -295,9 +566,9 @@ async def cmd_top_users(message: types.Message):
     text = "🏆 <b>ТОП-10 ИГРОКОВ ПО БАЛАНСУ:</b>\n"
     text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     for idx, user in enumerate(top_list, 1):
-        name = user.get('full_name') or user.get('username') or 'Игрок'
+        name = user.get('full_name') or user.get('username') or f"Игрок #{user.get('user_id')}"
         balance = user.get('balance', 0)
-        text += f"{idx}. <b>{html.escape(name)}</b> — <code>{format_short_amount(balance)}</code> Ucoin\n"
+        text += f"{idx}. <b>{html.escape(str(name))}</b> — <code>{format_short_amount(balance)}</code> Ucoin\n"
     
     await message.answer(text)
 
@@ -452,10 +723,88 @@ async def adm_take_amount(message: types.Message, state: FSMContext):
 
 # --- ОБЩИЕ ПОЛЬЗОВАТЕЛЬСКИЕ КОМАНДЫ ---
 @dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    user, is_new = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
-    welcome_text = f"<b>🚀 С ВОЗВРАЩЕНИЕМ!</b>\n💰 Баланс: <b>{format_short_amount(user['balance'])} Ucoin</b>" if not is_new else f"<b>🚀 ПРИВЕТ! ТЕБЕ НАЧИСЛЕНО 1к СТАРТОВЫХ UCOIN!</b>"
+async def cmd_start(message: types.Message, state: FSMContext):
+    # Проверка на наличие параметров запуска (глубокие ссылки)
+    args = message.text.split(maxsplit=1)
+    if len(args) > 1:
+        param = args[1]
+        if param == "check_menu":
+            await send_check_main_menu(message)
+            return
+        if param.startswith("CHECK_"):
+            token = param.split("_")[1]
+            await handle_check_activation(message, token, state)
+            return
+
+    user, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    welcome_text = f"<b>🚀 С ВОЗВРАЩЕНИЕМ!</b>\n💰 Баланс: <b>{format_short_amount(user['balance'])} Ucoin</b>" if user['games_played'] > 0 else f"<b>🚀 ПРИВЕТ! ТЕБЕ НАЧИСЛЕНО 1к СТАРТОВЫХ UCOIN!</b>"
     await message.answer(f"{welcome_text}\n\n" + get_help_text())
+
+async def handle_check_activation(message: types.Message, token: str, state: FSMContext):
+    if token not in CHECKS:
+        await message.answer("❌ <b>Ошибка!</b> Этот чек не найден, удален или у него закончились активации.")
+        return
+        
+    chk = CHECKS[token]
+    user_id = message.from_user.id
+    
+    if user_id == chk['creator_id']:
+        await message.answer("❌ Вы не можете активировать собственный чек!")
+        return
+        
+    if user_id in chk['activated_users']:
+        await message.answer("❌ Вы уже активировали этот чек ранее!")
+        return
+
+    if chk['password']:
+        await message.answer("🔒 <b>Этот чек защищен паролем! Введите пароль для получения награды:</b>")
+        await state.update_data(active_check_token=token)
+        await state.set_state(CheckActivationStates.waiting_for_password)
+    else:
+        await complete_check_activation(message, token)
+
+@dp.message(CheckActivationStates.waiting_for_password)
+async def process_activation_password(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    token = data.get('active_check_token')
+    
+    if not token or token not in CHECKS:
+        await message.answer("Произошла ошибка, чек уже неактивен.")
+        await state.clear()
+        return
+        
+    chk = CHECKS[token]
+    if message.text.strip() != chk['password']:
+        await message.answer("❌ <b>Неверный пароль!</b> Попробуйте активировать чек по ссылке заново.")
+        await state.clear()
+        return
+        
+    await state.clear()
+    await complete_check_activation(message, token)
+
+async def complete_check_activation(message: types.Message, token: str):
+    chk = CHECKS[token]
+    user_id = message.from_user.id
+    
+    chk['activations'] -= 1
+    chk['activated_users'].append(user_id)
+    
+    await database.win_game(user_id, chk['reward'])
+    
+    await message.answer(f"<b>🎉 ЧЕК УСПЕШНО АКТИВИРОВАН!</b>\n💰 Вам начислено: <b>+{format_short_amount(chk['reward'])} Ucoin</b>\n📝 Описание: {chk['description']}")
+    
+    # Уведомление создателю чека
+    try:
+        await bot.send_message(
+            chat_id=chk['creator_id'],
+            text=f"🔔 <b>Твой чек был активирован!</b>\n👤 Пользователь: <b>{html.escape(message.from_user.full_name)}</b>\n💰 Сумма: <b>{format_short_amount(chk['reward'])} Ucoin</b>\n📉 Осталось активаций: {chk['activations']}"
+        )
+    except Exception:
+        pass
+        
+    if chk['activations'] <= 0:
+        CHECKS.pop(token, None)
+
 
 @dp.message(lambda msg: msg.text and msg.text.lower() in ["бонус", "/bonus"])
 async def get_daily_bonus(message: types.Message):
@@ -539,6 +888,7 @@ async def gold_turn(callback: types.CallbackQuery):
 
     if chosen_cell == level_mine:
         await database.lose_game(owner_id, bet)
+        add_game_history(owner_id, "Золото Нации", f"-{format_short_amount(bet)}", "Слив 💥")
         SOLO_GAMES.pop((owner_id, 'gold'), None)
         await callback.message.edit_text(f"<b>💥 МИНА! Вы подорвались на {current_level}-м уровне Золота!</b>\n📉 Сгорело: {format_short_amount(bet)} Ucoin.", reply_markup=None)
         return
@@ -546,6 +896,7 @@ async def gold_turn(callback: types.CallbackQuery):
     current_win = int(bet * GOLD_MULTIPLIERS[current_level - 1])
     if current_level == 10:
         await database.win_game(owner_id, current_win)
+        add_game_history(owner_id, "Золото Нации", f"+{format_short_amount(current_win)}", "Вин 👑")
         SOLO_GAMES.pop((owner_id, 'gold'), None)
         await callback.message.edit_text(f"<b>👑 НЕВЕРОЯТНО! ВЫ ПРОШЛИ ВСЕ 10 УРОВНЕЙ ЗОЛОТА! 🎉\n🏆 Выиграно: {format_short_amount(current_win)} Ucoin (x1024)!</b>", reply_markup=None)
         return
@@ -573,6 +924,7 @@ async def gold_cashout(callback: types.CallbackQuery):
     data = SOLO_GAMES.pop((owner_id, 'gold'), {})
     win_sum = data.get('accumulated_win', 0)
     await database.win_game(owner_id, win_sum)
+    add_game_history(owner_id, "Золото Нации", f"+{format_short_amount(win_sum)}", "Забрал 💰")
     await callback.message.edit_text(f"<b>💰 КЭШАУТ ЗОЛОТА! Забрано: {format_short_amount(win_sum)} Ucoin!</b>", reply_markup=None)
 
 # --- РЕЖИМ МИНЫ ---
@@ -632,6 +984,7 @@ async def process_mines_click(callback: types.CallbackQuery):
 
     if grid[cell_idx]:
         await database.lose_game(owner_id, bet)
+        add_game_history(owner_id, "Мины", f"-{format_short_amount(bet)}", "Слив 💥")
         SOLO_GAMES.pop((owner_id, 'mines'), None)
         builder = InlineKeyboardBuilder()
         for i in range(25): builder.button(text="💥" if i == cell_idx else ("💣" if grid[i] else "💎"), callback_data="void")
@@ -646,6 +999,7 @@ async def process_mines_click(callback: types.CallbackQuery):
 
     if opened_count == (25 - mines_count):
         await database.win_game(owner_id, current_win)
+        add_game_history(owner_id, "Мины", f"+{format_short_amount(current_win)}", "Вин 💎")
         SOLO_GAMES.pop((owner_id, 'mines'), None)
         builder = InlineKeyboardBuilder()
         for i in range(25): builder.button(text="💣" if grid[i] else "💎", callback_data="void")
@@ -674,6 +1028,7 @@ async def process_mines_cashout(callback: types.CallbackQuery):
     mult = get_mines_multiplier(data['mines_count'], data['opened_count'])
     current_win = int(data['bet'] * mult)
     await database.win_game(owner_id, current_win)
+    add_game_history(owner_id, "Мины", f"+{format_short_amount(current_win)}", "Забрал 💰")
     await callback.message.edit_text(f"<b>💰 КЭШАУТ! Забрано: {format_short_amount(current_win)} Ucoin ({mult}x)</b>", reply_markup=None)
 
 
@@ -729,6 +1084,7 @@ async def tower_turn(callback: types.CallbackQuery):
 
     if current_mines[chosen_cell]:
         await database.lose_game(owner_id, bet)
+        add_game_history(owner_id, "Башня", f"-{format_short_amount(bet)}", "Слив 💥")
         SOLO_GAMES.pop((owner_id, 'tower'), None)
         await callback.message.edit_text(f"<b>💥 МИНА НА {current_level}-М ЭТАЖЕ!</b>\n📉 Потеряно: {format_short_amount(bet)} Ucoin.", reply_markup=None)
         return
@@ -736,6 +1092,7 @@ async def tower_turn(callback: types.CallbackQuery):
     current_win = int(bet * TOWER_MULTIPLIERS[mines_count][current_level - 1])
     if current_level == 5:
         await database.win_game(owner_id, current_win)
+        add_game_history(owner_id, "Башня", f"+{format_short_amount(current_win)}", "Вин 🏰")
         SOLO_GAMES.pop((owner_id, 'tower'), None)
         await callback.message.edit_text(f"<b>🏆 БАШНЯ СНЕСЕНА! Выигрыш: {format_short_amount(current_win)} Ucoin!</b>", reply_markup=None)
         return
@@ -765,6 +1122,7 @@ async def tower_cashout(callback: types.CallbackQuery):
     data = SOLO_GAMES.pop((owner_id, 'tower'), {})
     win_sum = data.get('accumulated_win', 0)
     await database.win_game(owner_id, win_sum)
+    add_game_history(owner_id, "Башня", f"+{format_short_amount(win_sum)}", "Забрал 💰")
     await callback.message.edit_text(f"<b>💰 ЗАБРАНО {format_short_amount(win_sum)} UCOIN!</b>", reply_markup=None)
 
 
@@ -817,11 +1175,13 @@ async def start_crash(message: types.Message):
     if crash_point >= target_x:
         win_amount = int(bet * target_x)
         await database.win_game(user_id, win_amount)
+        add_game_history(user_id, "Краш", f"+{format_short_amount(win_amount)}", f"Икс {target_x}x 🚀")
         await status_msg.edit_text(
             f"<b>💰 РАКЕТА УСПЕШНО ДОЛЕТЕЛА!</b>\n🎯 Твой забор: <code>{target_x}x</code>\n🎉 Выигрыш: <b>{format_short_amount(win_amount)} Ucoin!</b>"
         )
     else:
         await database.lose_game(user_id, bet)
+        add_game_history(user_id, "Краш", f"-{format_short_amount(bet)}", f"Краш на {crash_point}x 💥")
         await status_msg.edit_text(
             f"<b>💥 БУУУМ! РАКЕТА ВЗОРВАЛАСЬ! (КРАШ)</b>\n💥 Точка взрыва: <b>{crash_point}x</b>\n❌ Потеряно: <b>{format_short_amount(bet)} Ucoin</b>."
         )
@@ -860,6 +1220,7 @@ async def start_game_21(message: types.Message):
     if player_score == 21:
         win_amount = int(bet * 2)
         await database.win_game(user_id, win_amount)
+        add_game_history(user_id, "21 Очко", f"+{format_short_amount(win_amount)}", "21 Очко 🃏")
         await message.answer(f"<b>👑 ЗОЛОТОЕ ОЧКО! Сразу 21!</b>\n🎉 Выиграно: <b>{format_short_amount(win_amount)} Ucoin!</b>")
         return
 
@@ -894,11 +1255,13 @@ async def blackjack_hit_callback(callback: types.CallbackQuery):
 
     if player_score > 21:
         await database.lose_game(owner_id, bet)
+        add_game_history(owner_id, "21 Очко", f"-{format_short_amount(bet)}", "Перебор 💥")
         SOLO_GAMES.pop((owner_id, 'bj'), None)
         await callback.message.edit_text(f"<b>💥 ПЕРЕБОР! У вас {player_score} очков.</b>\n❌ Сгорело: <b>{format_short_amount(bet)} Ucoin</b>", reply_markup=None)
     elif player_score == 21:
         win_amount = int(bet * 2)
         await database.win_game(owner_id, win_amount)
+        add_game_history(owner_id, "21 Очко", f"+{format_short_amount(win_amount)}", "21 Вин 👑")
         SOLO_GAMES.pop((owner_id, 'bj'), None)
         await callback.message.edit_text(f"<b>👑 21 ОЧКО! Победа!</b>\n🎉 Куш: <b>{format_short_amount(win_amount)} Ucoin</b>", reply_markup=None)
     else:
@@ -928,16 +1291,20 @@ async def blackjack_stop_callback(callback: types.CallbackQuery):
     if dealer_score > 21:
         win_amount = int(bet * 2)
         await database.win_game(owner_id, win_amount)
+        add_game_history(owner_id, "21 Очко", f"+{format_short_amount(win_amount)}", "Вин (Дилер перебор) 💰")
         res = f"<b>💰 У Дилера перебор ({dealer_score})!</b>\n🎉 Выиграно: {format_short_amount(win_amount)}"
     elif player_score > dealer_score:
         win_amount = int(bet * 2)
         await database.win_game(owner_id, win_amount)
+        add_game_history(owner_id, "21 Очко", f"+{format_short_amount(win_amount)}", "Победа по очкам 🏆")
         res = f"<b>💰 Победа по очкам! ({player_score} vs {dealer_score})</b>\n🎉 Выиграно: {format_short_amount(win_amount)}"
     elif player_score < dealer_score:
         await database.lose_game(owner_id, bet)
+        add_game_history(owner_id, "21 Очко", f"-{format_short_amount(bet)}", "Проигрыш дилеру 📉")
         res = f"<b>❌ Проигрыш! У дилера {dealer_score} очков.</b>"
     else:
         await database.win_game(owner_id, bet)
+        add_game_history(owner_id, "21 Очко", "0", "Ничья 🤝")
         res = f"<b>🤝 Ничья! Ставка возвращена.</b>"
 
     await callback.message.edit_text(f"<b>👑 ФИНАЛ: 21 ОЧКО</b>\n🫵 Вы: {player_score} | 🤖 Дилер: {dealer_score}\n\n{res}", reply_markup=None)
@@ -959,10 +1326,8 @@ async def create_duel_ttt(message: types.Message):
         await message.answer("<b>❌ Ошибка ставки или недостаточно баланса!</b>")
         return
 
-    # Списываем баланс СРАЗУ при создании дуэли
     await database.start_game_bet(message.from_user.id, bet)
 
-    # Генерация случайного уникального ID дуэли для предотвращения багов cross-chat'а
     duel_id = random.randint(100000, 999999)
     while duel_id in DUELS:
         duel_id = random.randint(100000, 999999)
@@ -1066,181 +1431,24 @@ async def process_ttt_turn(callback: types.CallbackQuery):
         if result == 'Ничья':
             await database.win_game(duel['creator'], bet)
             await database.win_game(duel['opponent'], bet)
+            add_game_history(duel['creator'], "Крестики-Нолики", "0", "Ничья 🤝")
+            add_game_history(duel['opponent'], "Крестики-Нолики", "0", "Ничья 🤝")
             await callback.message.edit_text(f"🤝 <b>НИЧЬЯ В КРЕСТИКИ-НОЛИКИ!</b>\nВсе клетки заполнены, коины возвращены игрокам.", reply_markup=None)
         else:
             winner_id = duel['creator'] if result == '❌' else duel['opponent']
+            loser_id = duel['opponent'] if result == '❌' else duel['creator']
             winner_name = html.escape(duel['creator_name'] if result == '❌' else duel['opponent_name'])
+            
             await database.win_game(winner_id, bet * 2)
-            await callback.message.edit_text(f"🏆 <b>ПОБЕДА В ДУЭЛИ!</b>\n━━━━━━━━━━━━━━━━━━━━━━━\nИгрок <b>{winner_name}</b> выиграл <b>{format_short_amount(bet * 2)} Ucoin!</b>", reply_markup=None)
+            add_game_history(winner_id, "Крестики-Нолики", f"+{format_short_amount(bet * 2)}", "PvP Победа 🏆")
+            add_game_history(loser_id, "Крестики-Нолики", f"-{format_short_amount(bet)}", "PvP Слив 📉")
+            
+            await callback.message.edit_text(f"🏆 <b>ПОБЕДА В ДУЭЛИ!</b>\n━━━━━━━━━━━━━━━━━━━━━━•\nИгрок <b>{winner_name}</b> выиграл <b>{format_short_amount(bet * 2)} Ucoin!</b>", reply_markup=None)
         DUELS.pop(duel_id, None)
         return
 
-    # Переключаем ход
     duel['turn'] = duel['opponent'] if user_id == duel['creator'] else duel['creator']
     await edit_ttt_board(callback.message, duel_id)
-
-
-# =====================================================================
-# --- PvP РЕЖИМ 2: ДУЭЛЬ НА КУБИКАХ (Куб) ---
-# =====================================================================
-@dp.message(lambda msg: msg.text and msg.text.lower().startswith("куб"))
-async def create_duel_dice(message: types.Message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("<b>⚠️ Формат в чате: <code>Куб [ставка]</code> (Пример: Куб 10к)</b>")
-        return
-
-    user, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
-    bet = parse_amount(parts[1], user['balance'])
-    if bet <= 0 or user['balance'] < bet:
-        await message.answer("<b>❌ Недостаточно средств для создания дуэли!</b>")
-        return
-
-    # Списываем баланс СРАЗУ при создании дуэли
-    await database.start_game_bet(message.from_user.id, bet)
-
-    duel_id = random.randint(100000, 999999)
-    while duel_id in DUELS:
-        duel_id = random.randint(100000, 999999)
-
-    DUELS[duel_id] = {
-        'type': 'dice', 'bet': bet, 'creator': message.from_user.id, 'creator_name': message.from_user.first_name,
-        'opponent': None, 'opponent_name': None, 'creator_roll': None, 'opponent_roll': None, 'status': 'open',
-        'chat_id': message.chat.id, 'message_id': None
-    }
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🎲 Принять дуэль кубов", callback_data=f"dcj_{duel_id}")
-    sent_msg = await message.reply(
-        f"🎲 <b>PvP ДУЭЛЬ: КУБИКИ!</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Ставка: <b>{format_short_amount(bet)} Ucoin</b>\n"
-        f"👤 Создатель: {html.escape(message.from_user.first_name)}\n\n"
-        f"💬 <b>ПРАВИЛА ИГРЫ:</b>\n"
-        f"1. Оппонент жмет кнопку ниже для входа.\n"
-        f"2. <b>ОБА</b> игрока делают бросок 🎲 (Reply кубиком) на это сообщение!\n"
-        f"3. Бот считывает очки и выдает x2 победителю!",
-        reply_markup=builder.as_markup()
-    )
-    DUELS[duel_id]['message_id'] = sent_msg.message_id
-
-@dp.callback_query(F.data.startswith("dcj_"))
-async def join_duel_dice(callback: types.CallbackQuery):
-    duel_id = int(callback.data.split("_")[1])
-    if duel_id not in DUELS or DUELS[duel_id]['status'] != 'open':
-        await callback.answer("⚠️ Эта дуэль кубов уже занята или неактивна.", show_alert=True)
-        return
-
-    duel = DUELS[duel_id]
-    user_id = callback.from_user.id
-    if user_id == duel['creator']:
-        await callback.answer("❌ Вы создатель!", show_alert=True)
-        return
-
-    user, _ = await database.get_or_create_user(user_id, callback.from_user.full_name)
-    if user['balance'] < duel['bet']:
-        await callback.answer("❌ Нет денег для входа!", show_alert=True)
-        return
-
-    await callback.answer("Вы зашли в дуэль кубов!")
-    await database.start_game_bet(user_id, duel['bet'])
-    
-    duel.update({
-        'opponent': user_id, 'opponent_name': callback.from_user.first_name, 'status': 'playing'
-    })
-
-    await callback.message.edit_text(
-        f"🎲 <b>ДУЭЛЬ В КУБЫ (ИДЁТ СБОР БРОСКОВ)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Ставка: {format_short_amount(duel['bet'])} Ucoin\n"
-        f"⚔️ Игроки: <b>{html.escape(duel['creator_name'])}</b> и <b>{html.escape(duel['opponent_name'])}</b>\n\n"
-        f"👉 <b>ОБОИМ игрокам нужно отправить эмодзи 🎲 ответом (REPLY) на это сообщение!</b>",
-        reply_markup=None
-    )
-
-@dp.message(F.dice, F.reply_to_message)
-async def handle_pvp_dice_rolls(message: types.Message):
-    if message.dice.emoji != "🎲": return
-    target_msg_id = message.reply_to_message.message_id
-    chat_id = message.chat.id
-
-    # Находим игру по chat_id и message_id родительского сообщения бота
-    found_duel_id = None
-    for d_id, d_data in DUELS.items():
-        if d_data['chat_id'] == chat_id and d_data['message_id'] == target_msg_id:
-            found_duel_id = d_id
-            break
-
-    if found_duel_id is None: return
-    duel = DUELS[found_duel_id]
-    if duel['type'] != 'dice' or duel['status'] != 'playing': return
-
-    user_id = message.from_user.id
-    val = message.dice.value  # Бот успешно считывает, сколько выпало на кубике
-
-    if user_id == duel['creator']:
-        if duel['creator_roll'] is not None:
-            await message.reply("⚠️ Вы уже сделали свой бросок!")
-            return
-        duel['creator_roll'] = val
-    elif user_id == duel['opponent']:
-        if duel['opponent_roll'] is not None:
-            await message.reply("⚠️ Оппонент уже сделал свой бросок!")
-            return
-        duel['opponent_roll'] = val
-    else:
-        return
-
-    # Если оба броска собраны — подводим результаты
-    if duel['creator_roll'] is not None and duel['opponent_roll'] is not None:
-        # Меняем статус немедленно, чтобы второй параллельный поток прервался
-        if duel['status'] != 'playing':
-            return
-        duel['status'] = 'finished'
-        
-        await asyncio.sleep(2.5)  # Даем время анимации кубика докрутиться
-        
-        # Забираем сессию из ОЗУ сразу, защищаясь от дублирования выплат
-        if found_duel_id not in DUELS: return
-        duel_data = DUELS.pop(found_duel_id, None)
-        if not duel_data: return
-        
-        c_score = duel_data['creator_roll']
-        o_score = duel_data['opponent_roll']
-        bet = duel_data['bet']
-        
-        c_name = html.escape(duel_data['creator_name'])
-        o_name = html.escape(duel_data['opponent_name'])
-        
-        # Форматирование и определение победителя по правилу "у кого больше — тот и вин"
-        if c_score > o_score:
-            await database.win_game(duel_data['creator'], bet * 2)
-            res_text = (
-                f"🏆 В дуэли кубов побеждает <b>{c_name} ({c_score})</b>!\n"
-                f"🎲 Броски игроков: <b>{c_name} ({c_score})</b> vs <b>{o_name} ({o_score})</b>\n"
-                f"📈 У кого выпало число больше — тот забрал весь банк!\n"
-                f"🎉 Выигрыш: <b>{format_short_amount(bet * 2)} Ucoin</b>"
-            )
-        elif o_score > c_score:
-            await database.win_game(duel_data['opponent'], bet * 2)
-            res_text = (
-                f"🏆 В дуэли кубов побеждает <b>{o_name} ({o_score})</b>!\n"
-                f"🎲 Броски игроков: <b>{c_name} ({c_score})</b> vs <b>{o_name} ({o_score})</b>\n"
-                f"📈 У кого выпало число больше — тот забрал весь банк!\n"
-                f"🎉 Выигрыш: <b>{format_short_amount(bet * 2)} Ucoin</b>"
-            )
-        else:
-            await database.win_game(duel_data['creator'], bet)
-            await database.win_game(duel_data['opponent'], bet)
-            res_text = (
-                f"🤝 <b>Ничья!</b> У игроков выпало одинаково по <b>{c_score}</b>!\n"
-                f"🎲 Броски игроков: <b>{c_name} ({c_score})</b> vs <b>{o_name} ({o_score})</b>\n"
-                f"💰 Ставки возвращены обоим участникам на баланс."
-            )
-
-        await bot.send_message(
-            chat_id=message.chat.id,
-            text=f"📊 <b>ИТОГИ PvP ДУЭЛИ В КУБЫ:</b>\n━━━━━━━━━━━━━━━━━━━━━━\n{res_text}",
-            reply_to_message_id=target_msg_id
-        )
 
 
 # =====================================================================
@@ -1252,7 +1460,6 @@ async def cancel_duel_handler(message: types.Message):
     chat_id = message.chat.id
     found_duel_id = None
 
-    # Сценарий 1: Пользователь сделал REPLY на сообщение дуэли
     if message.reply_to_message:
         target_msg_id = message.reply_to_message.message_id
         for d_id, d_data in DUELS.items():
@@ -1260,7 +1467,6 @@ async def cancel_duel_handler(message: types.Message):
                 found_duel_id = d_id
                 break
 
-    # Сценарий 2: Пользователь просто написал отмена в чат (ищем его открытое лобби в этой группе)
     if found_duel_id is None:
         for d_id, d_data in DUELS.items():
             if d_data['chat_id'] == chat_id and d_data['creator'] == user_id and d_data['status'] == 'open':
@@ -1279,7 +1485,6 @@ async def cancel_duel_handler(message: types.Message):
         await message.reply("<b>❌ Дуэль уже идет или завершена, отмена невозможна!</b>")
         return
 
-    # Возврат коинов создателю на баланс
     await database.win_game(user_id, duel['bet'])
     DUELS.pop(found_duel_id, None)
 
@@ -1304,6 +1509,9 @@ async def main():
     
     await bot.set_my_commands([
         types.BotCommand(command="start", description="Главное меню"),
+        types.BotCommand(command="game", description="Все игры бота"),
+        types.BotCommand(command="history", description="История моих игр"),
+        types.BotCommand(command="check", description="Денежные чеки (ЛС)"),
         types.BotCommand(command="balance", description="Мой баланс"),
         types.BotCommand(command="profile", description="Мой профиль"),
         types.BotCommand(command="top", description="Топ игроков"),
