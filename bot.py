@@ -257,12 +257,12 @@ def get_help_text():
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👉 <b>БАНК / БАЛАНС / Б</b> — <b>Баланс кошелька</b>\n"
         f"👉 <b>ПРОФИЛЬ</b> — <b>Статистика аккаунта</b>\n"
-        f"👉 <b>ТОП / /top</b> — <b>Топ-10 богачей бота</b> 🏆\n"
         f"👉 <b>ИГРЫ / /game</b> — <b>Меню со всеми играми</b> 🎮\n"
         f"👉 <b>ИСТОРИЯ / /history</b> — <b>История твоих игр (с перелистыванием)</b> 📋\n"
         f"👉 <b>ЧЕК / /check</b> — <b>Создать/Посмотреть свои чеки (ТОЛЬКО В ЛС)</b> 🎫\n"
         f"👉 <b>БОНУС</b> — <b>Ежедневная халява (до 10кк)</b>\n"
         f"👉 <b>ПРОМО [код]</b> — <b>Активировать промокод</b>\n"
+        f"👉 <b>ОРЕЛ [ставка] / РЕШКА [ставка]</b> — <b>Игра в монетку 🪙</b>\n"
         f"👉 <b>ЗОЛОТО [ставка]</b> — <b>Золото 50/50 (10 уровней)</b> 🌟\n"
         f"👉 <b>БАШНЯ [ставка] [мины]</b> — <b>Запустить Башню (от 1 до 4 мин)</b>\n"
         f"👉 <b>МИНЫ [ставка] [мины]</b> — <b>Запустить Мины 5х5 (от 1 до 24 мин)</b>\n"
@@ -280,6 +280,7 @@ async def cmd_all_games(message: types.Message):
     games_text = (
         f"🎮 <b>ИГРОВЫЕ РЕЖИМЫ КАЗИНО:</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 <b>МОНЕТКА</b> — Напиши <code>Орел [ставка]</code> или <code>Решка [ставка]</code>\n"
         f"🌟 <b>ЗОЛОТО</b> — Напиши <code>Золото [ставка]</code> (Угадывай ячейки, до х1024)\n"
         f"🏰 <b>БАШНЯ</b> — Напиши <code>Башню [ставка] [мины]</code> (Поднимайся по этажам)\n"
         f"💣 <b>МИНЫ</b> — Напиши <code>Мины [ставка] [мины]</code> (Поле 5х5, ищи алмазы)\n"
@@ -362,7 +363,7 @@ async def send_check_main_menu(event):
     builder.button(text="🗂 Мои чеки", callback_data="chk_my_list")
     builder.adjust(1, 1)
     
-    text = "🎫 <b>МЕНЮ ДЕНЕЖНЫХ ЧЕКОВ</b>\n\nЗдесь ты можешь создать чек на определенную сумму Ucoin с паролем или без, настроить количество активаций и раздать ссылку друзьям!"
+    text = "🎫 <b>МЕНЮ ДЕНЕЖНЫХ ЧЕКОВ</b>\n\nЗдесь ты можешь создать чек on определенную сумму Ucoin с паролем или без, настроить количество активаций и раздать ссылку друзьям!"
     if isinstance(event, types.Message):
         await event.answer(text, reply_markup=builder.as_markup())
     else:
@@ -551,26 +552,54 @@ async def handle_group_transfer(message: types.Message):
         f"💰 <b>Сумма:</b> <b>{format_short_amount(amount)} Ucoin</b>"
     )
 
-# --- ТОП ПО БАЛАНСАМ (РЕАЛЬНЫЙ ТОП-10) ---
-@dp.message(lambda msg: msg.text and msg.text.lower() in ["топ", "/top", "топ 10"])
-async def cmd_top_users(message: types.Message):
-    try:
-        top_list = await database.get_top_users(limit=10)
-    except Exception:
-        top_list = []
-
-    if not top_list:
-        await message.answer("<b>📊 Топ игроков пуст или функция не настроена в базе данных.</b>")
+# --- РЕЖИМ МОНЕТКА (ОРЕЛ / РЕШКА) ---
+@dp.message(lambda msg: msg.text and msg.text.lower().split()[0] in ["орел", "решка"])
+async def cmd_coin_flip(message: types.Message):
+    user_id = message.from_user.id
+    parts = message.text.split()
+    
+    if len(parts) < 2:
+        await message.answer("<b>⚠️ Формат: <code>Орел [ставка]</code> или <code>Решка [ставка]</code></b>")
         return
 
-    text = "🏆 <b>ТОП-10 ИГРОКОВ ПО БАЛАНСУ:</b>\n"
-    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    for idx, user in enumerate(top_list, 1):
-        name = user.get('full_name') or user.get('username') or f"Игрок #{user.get('user_id')}"
-        balance = user.get('balance', 0)
-        text += f"{idx}. <b>{html.escape(str(name))}</b> — <code>{format_short_amount(balance)}</code> Ucoin\n"
+    choice_str = parts[0].lower()
+    user, _ = await database.get_or_create_user(user_id, message.from_user.full_name)
+    bet = parse_amount(parts[1], user['balance'])
     
-    await message.answer(text)
+    if bet <= 0 or user['balance'] < bet:
+        await message.answer("<b>❌ Неверная ставка или недостаточно коинов!</b>")
+        return
+
+    await database.start_game_bet(user_id, bet)
+    
+    # Имитируем бросок монетки
+    status_msg = await message.answer("🪙 <b>Монетка подброшена... Крутится...</b>")
+    await asyncio.sleep(1.5)
+    
+    flip_result = random.choice(["орел", "решка"])
+    result_emoji = "🦅 ОРЕЛ" if flip_result == "орел" else "🪙 РЕШКА"
+    
+    if choice_str == flip_result:
+        win_amount = int(bet * 2)
+        await database.win_game(user_id, win_amount)
+        add_game_history(user_id, "Монетка", f"+{format_short_amount(win_amount)}", f"Выпал {flip_result} 🎉")
+        await status_msg.edit_text(
+            f"🎰 <b>ИГРА: МОНЕТКА</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Твой выбор: <b>{choice_str.upper()}</b>\n"
+            f"✨ Выпало: <b>{result_emoji}</b>\n\n"
+            f"🎉 <b>Вы выиграли! Награда: +{format_short_amount(win_amount)} Ucoin!</b>"
+        )
+    else:
+        await database.lose_game(user_id, bet)
+        add_game_history(user_id, "Монетка", f"-{format_short_amount(bet)}", f"Выпал {flip_result} 💥")
+        await status_msg.edit_text(
+            f"🎰 <b>ИГРА: МОНЕТКА</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Твой выбор: <b>{choice_str.upper()}</b>\n"
+            f"✨ Выпало: <b>{result_emoji}</b>\n\n"
+            f"💥 <b>Вы проиграли! Минус {format_short_amount(bet)} Ucoin.</b>"
+        )
 
 # --- АКТИВАЦИЯ ПРОМОКОДОВ ---
 @dp.message(lambda msg: msg.text and (msg.text.lower().startswith("промо ") or msg.text.lower().startswith("/promo ")))
@@ -1514,7 +1543,6 @@ async def main():
         types.BotCommand(command="check", description="Денежные чеки (ЛС)"),
         types.BotCommand(command="balance", description="Мой баланс"),
         types.BotCommand(command="profile", description="Мой профиль"),
-        types.BotCommand(command="top", description="Топ игроков"),
         types.BotCommand(command="bonus", description="Взять бонус"),
     ])
     await dp.start_polling(bot)
