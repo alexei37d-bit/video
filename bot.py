@@ -5,6 +5,7 @@ import random
 import time
 import logging
 import asyncio
+from decimal import Decimal, InvalidOperation
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command
 from aiogram.client.default import DefaultBotProperties
@@ -112,7 +113,6 @@ def parse_amount(text: str, current_balance: int) -> int:
     
     text = text.replace(" ", "").replace(",", ".")
     
-    # Считаем количество букв 'к' (русских или английских) в конце строки
     k_count = 0
     while text.endswith('к') or text.endswith('k'):
         k_count += 1
@@ -121,8 +121,10 @@ def parse_amount(text: str, current_balance: int) -> int:
     multiplier = 1000 ** k_count
         
     try:
-        return int(float(text) * multiplier)
-    except ValueError:
+        # Использование Decimal защищает от OverflowError при вводе гигантских чисел
+        val = Decimal(text) * Decimal(multiplier)
+        return int(val)
+    except (ValueError, InvalidOperation):
         return -1
 
 def format_short_amount(amount: int) -> str:
@@ -132,13 +134,12 @@ def format_short_amount(amount: int) -> str:
     if abs_amount == 0:
         return "0"
         
-    # Генерируем список суффиксов из повторяющихся 'к' с огромным запасом (до 20 уровней)
-    suffixes = [""] + ["к" * i for i in range(1, 21)]
+    # Динамические суффиксы с огромным запасом (до 50 уровней «к»)
+    suffixes = [""] + ["к" * i for i in range(1, 51)]
     
     tier = 0
     temp = abs_amount
     
-    # Определяем разряд числа (тысячи, миллионы, миллиарды, триллионы...)
     while temp >= 1000 and tier < len(suffixes) - 1:
         temp //= 1000
         tier += 1
@@ -148,7 +149,6 @@ def format_short_amount(amount: int) -> str:
     else:
         divisor = 1000 ** tier
         val = abs_amount / divisor
-        # Если число целое — выводим без точки, если дробное — округляем до 2 знаков
         res = f"{int(val) if val.is_integer() else round(val, 2)}{suffixes[tier]}"
         
     return f"-{res}" if is_negative else res
@@ -195,12 +195,10 @@ def get_random_card_21():
     card = random.choice(list(CARDS_21.keys()))
     return card, CARDS_21[card]
 
-# --- ОБРАБОТЧИК ДЛЯ КНОПОК БЕЗ ДЕЙСТВИЯ (ЗАВЕРШЕННЫЕ МИНЫ) ---
 @dp.callback_query(F.data == "void")
 async def process_void_click(callback: types.CallbackQuery):
     await callback.answer()
 
-# --- ОБРАБОТЧИК НАЖАТИЯ НА КНОПКУ «ПРОВЕРИТЬ ПОДПИСКУ» ---
 @dp.callback_query(F.data == "sub_check_btn")
 async def process_sub_check_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -375,7 +373,7 @@ async def adm_give_id(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     try:
         await state.update_data(target_id=int(message.text))
-        await message.answer("<b>Какую сумму выдать? (можно 10кк):</b>")
+        await message.answer("<b>Какую сумму выдать? (Ограничений нет, можно хоть 100кккккккк):</b>")
         await state.set_state(AdminStates.waiting_for_give_amount)
     except ValueError: await message.answer("ID должен состоять из цифр!")
 
@@ -383,12 +381,16 @@ async def adm_give_id(message: types.Message, state: FSMContext):
 async def adm_give_amount(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     data = await state.get_data()
-    amount = parse_amount(message.text, 999_999_999_999)
+    target_id = data['target_id']
+    
+    # Передаем максимальный лимит для макроса "все", если админ решит написать его при выдаче
+    amount = parse_amount(message.text, 9223372036854775807)
     if amount <= 0:
         await message.answer("Ошибка в изменении.")
         await state.clear()
         return
-    success = await database.update_balance_admin(data['target_id'], amount)
+        
+    success = await database.update_balance_admin(target_id, amount)
     if success: await message.answer(f"Успешно выдано +{format_short_amount(amount)} Ucoin")
     else: await message.answer("Пользователь не найден.")
     await state.clear()
@@ -404,7 +406,7 @@ async def adm_take_id(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     try:
         await state.update_data(target_id=int(message.text))
-        await message.answer("<b>Какую сумму списать? (можно 5кк):</b>")
+        await message.answer("<b>Какую сумму списать? (Напишите «все», чтобы обнулить игрока под ноль):</b>")
         await state.set_state(AdminStates.waiting_for_take_amount)
     except ValueError: await message.answer("ID должен быть числом.")
 
@@ -412,12 +414,18 @@ async def adm_take_id(message: types.Message, state: FSMContext):
 async def adm_take_amount(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     data = await state.get_data()
-    amount = parse_amount(message.text, 999_999_999_999)
+    target_id = data['target_id']
+    
+    # Динамически получаем текущий баланс жертвы из БД, чтобы макрос "все" списал ровно его подчистую
+    target_user, _ = await database.get_or_create_user(target_id, "Игрок")
+    
+    amount = parse_amount(message.text, target_user['balance'])
     if amount <= 0:
-        await message.answer("Ошибка.")
+        await message.answer("Ошибка в сумме.")
         await state.clear()
         return
-    success = await database.update_balance_admin(data['target_id'], -amount)
+        
+    success = await database.update_balance_admin(target_id, -amount)
     if success: await message.answer(f"Списано -{format_short_amount(amount)} Ucoin")
     else: await message.answer("Пользователь не найден.")
     await state.clear()
