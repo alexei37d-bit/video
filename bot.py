@@ -4,6 +4,7 @@ import math
 import random
 import time
 import logging
+import asyncio
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command
 from aiogram.client.default import DefaultBotProperties
@@ -29,13 +30,19 @@ TOWER_MULTIPLIERS = {
     4: [15.00, 120.00, 1100.00, 9500.00, 85000.00]
 }
 
-# Множители для игры Золото (удвоение на каждом из 10 шагов)
 GOLD_MULTIPLIERS = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+
+# Карты для игры в 21 очко
+CARDS_21 = {
+    '6 🂶': 6, '7 🂷': 7, '8 🂸': 8, '9 🂹': 9, '10 🂺': 10,
+    'Валет 🂻': 2, 'Дама 🂽': 3, 'Король 🂾': 4, 'Туз 🂱': 11
+}
 
 class GameStates(StatesGroup):
     playing_tower = State()
     playing_mines = State()
-    playing_gold = State()  # Новое состояние для игры Золото
+    playing_gold = State()  
+    playing_21 = State()    # Новое состояние для игры в 21
 
 class AdminStates(StatesGroup):
     waiting_for_give_id = State()
@@ -162,7 +169,6 @@ def render_tower_text(current_level, bet, mines_count, next_win, current_win=0):
         f"📈 <b>Следующий шаг:</b> <b>+{format_short_amount(next_win)} Ucoin</b>"
     )
 
-# Визуализация для новой игры Золото
 def render_gold_text(current_level, bet, next_win, current_win=0):
     rows = []
     for lvl in range(10, 0, -1):
@@ -175,6 +181,10 @@ def render_gold_text(current_level, bet, next_win, current_win=0):
         f"💵 <b>Текущий куш:</b> <b>{format_short_amount(current_win)} Ucoin</b>\n"
         f"📈 <b>Следующий шаг (x2):</b> <b>+{format_short_amount(next_win)} Ucoin</b>"
     )
+
+def get_random_card_21():
+    card = random.choice(list(CARDS_21.keys()))
+    return card, CARDS_21[card]
 
 # --- ОБРАБОТЧИК НАЖАТИЯ НА КНОПКУ «ПРОВЕРИТЬ ПОДПИСКУ» ---
 @dp.callback_query(F.data == "sub_check_btn")
@@ -207,9 +217,11 @@ async def process_sub_check_callback(callback: types.CallbackQuery):
             f"👉 <b>ПРОФИЛЬ</b> — <b>Статистика аккаунта</b>\n"
             f"👉 <b>БОНУС</b> — <b>Ежедневная халява (до 10кк)</b>\n"
             f"👉 <b>ПРОМО [код]</b> — <b>Активировать промокод</b>\n"
-            f"👉 <b>ЗОЛОТО [ставка]</b> — <b>Золото 50/50 (10 этажей, умножение x2)</b> 🌟\n"
-            f"👉 <b>БАШНЯ [ставка] [мины]</b> — <b>Запустить Башню (мины от 1 до 4)</b>\n"
-            f"👉 <b>МИНЫ [ставка] [мины]</b> — <b>Запустить Мины 5х5 (мины от 1 до 24)</b>"
+            f"👉 <b>ЗОЛОТО [ставка]</b> — <b>Золото 50/50 (10 уровней)</b> 🌟\n"
+            f"👉 <b>БАШНЯ [ставка] [мины]</b> — <b>Запустить Башню (от 1 до 4 мин)</b>\n"
+            f"👉 <b>МИНЫ [ставка] [мины]</b> — <b>Запустить Мины 5х5 (от 1 до 24 мин)</b>\n"
+            f"👉 <b>21 [ставка]</b> — <b>Классическое Очко (21) на кнопках</b> 🃏\n"
+            f"👉 <b>КРАШ [ставка] [икс]</b> — <b>Режим Краш ракеты (Пример: краш 20к 2.5)</b> 🚀"
         )
     else:
         await callback.answer("❌ Проверка не пройдена! Вы подписались не на все ресурсы.", show_alert=True)
@@ -411,9 +423,11 @@ async def cmd_start(message: types.Message):
         f"👉 <b>ПРОФИЛЬ</b> — <b>Статистика аккаунта</b>\n"
         f"👉 <b>БОНУС</b> — <b>Ежедневная халява (до 10кк)</b>\n"
         f"👉 <b>ПРОМО [код]</b> — <b>Активировать промокод</b>\n"
-        f"👉 <b>ЗОЛОТО [ставка]</b> — <b>Золото 50/50 (10 этажей, умножение x2)</b> 🌟\n"
-        f"👉 <b>БАШНЯ [ставка] [мины]</b> — <b>Запустить Башню (мины от 1 до 4)</b>\n"
-        f"👉 <b>МИНЫ [ставка] [мины]</b> — <b>Запустить Мины 5х5 (мины от 1 до 24)</b>"
+        f"👉 <b>ЗОЛОТО [ставка]</b> — <b>Золото 50/50 (10 уровней)</b> 🌟\n"
+        f"👉 <b>БАШНЯ [ставка] [мины]</b> — <b>Запустить Башню (от 1 до 4 мин)</b>\n"
+        f"👉 <b>МИНЫ [ставка] [мины]</b> — <b>Запустить Мины 5х5 (от 1 до 24 мин)</b>\n"
+        f"👉 <b>21 [ставка]</b> — <b>Классическое Очко (21) на кнопках</b> 🃏\n"
+        f"👉 <b>КРАШ [ставка] [икс]</b> — <b>Режим Краш ракеты (Пример: краш 20к 2.5)</b> 🚀"
     )
 
 @dp.message(lambda msg: msg.text and msg.text.lower() in ["бонус", "/bonus"])
@@ -449,10 +463,10 @@ async def check_profile(message: types.Message):
         f"<b>📉 ВСЕГО ПРОИГРАНО: {format_short_amount(user['total_lost'])} Ucoin</b>"
     )
 
-# --- РЕЖИМ ЗОЛОТО (НОВЫЙ!) ---
+# --- РЕЖИМ ЗОЛОТО ---
 @dp.message(lambda msg: msg.text and msg.text.lower().startswith("золото"))
 async def start_gold(message: types.Message, state: FSMContext):
-    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines, GameStates.playing_gold]:
+    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines, GameStates.playing_gold, GameStates.playing_21]:
         await message.answer("<b>❌ Завершите вашу прошлую игру!</b>")
         return
 
@@ -473,7 +487,6 @@ async def start_gold(message: types.Message, state: FSMContext):
 
     await database.start_game_bet(message.from_user.id, bet)
     
-    # Генерируем мину для 1 уровня (0 или 1)
     level_mine = random.randint(0, 1)
     next_win = int(bet * GOLD_MULTIPLIERS[0])
 
@@ -495,24 +508,20 @@ async def gold_turn(callback: types.CallbackQuery, state: FSMContext):
     bet, current_level, level_mine = data['bet'], data['current_level'], data['level_mine']
     chosen_cell = int(callback.data.split("_")[2])
 
-    # Если игрок выбрал ячейку, где сгенерирована мина
     if chosen_cell == level_mine:
         await database.lose_game(callback.from_user.id, bet)
         await state.clear()
         await callback.message.edit_text(f"<b>💥 МИНА! Вы подорвались на {current_level}-м уровне Золота!</b>\n📉 Сгорело: {format_short_amount(bet)} Ucoin.", reply_markup=None)
         return
 
-    # Рассчитываем текущий куш
     current_win = int(bet * GOLD_MULTIPLIERS[current_level - 1])
 
-    # Если это был последний 10 уровень
     if current_level == 10:
         await database.win_game(callback.from_user.id, current_win)
         await state.clear()
         await callback.message.edit_text(f"<b>👑 НЕВЕРОЯТНО! ВЫ ПРОШЛИ ВСЕ 10 УРОВНЕЙ ЗОЛОТА! 🎉\n🏆 Выиграно: {format_short_amount(current_win)} Ucoin (x1024)!</b>", reply_markup=None)
         return
 
-    # Иначе переводим на следующий уровень
     next_level = current_level + 1
     next_win = int(bet * GOLD_MULTIPLIERS[next_level - 1])
     next_mine = random.randint(0, 1)
@@ -541,7 +550,7 @@ async def gold_cashout(callback: types.CallbackQuery, state: FSMContext):
 # --- РЕЖИМ МИНЫ ---
 @dp.message(lambda msg: msg.text and msg.text.lower().startswith("мины"))
 async def start_mines(message: types.Message, state: FSMContext):
-    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines, GameStates.playing_gold]:
+    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines, GameStates.playing_gold, GameStates.playing_21]:
         await message.answer("<b>❌ Завершите прошлую игру!</b>")
         return
 
@@ -644,10 +653,11 @@ async def process_mines_cashout(callback: types.CallbackQuery, state: FSMContext
     await state.clear()
     await callback.message.edit_text(f"<b>💰 КЭШАУТ! Забрано: {format_short_amount(current_win)} Ucoin ({mult}x)</b>", reply_markup=None)
 
+
 # --- РЕЖИМ БАШНЯ ---
 @dp.message(lambda msg: msg.text and msg.text.lower().startswith("башня"))
 async def start_tower(message: types.Message, state: FSMContext):
-    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines, GameStates.playing_gold]:
+    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines, GameStates.playing_gold, GameStates.playing_21]:
         await message.answer("<b>❌ Завершите активную игру!</b>")
         return
 
@@ -731,6 +741,246 @@ async def tower_cashout(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(f"<b>💰 ЗАБРАНО {format_short_amount(win_sum)} UCOIN!</b>", reply_markup=None)
     await state.clear()
 
+
+# ================= НОВАЯ ИГРА: КРАШ (CRASH) =================
+@dp.message(lambda msg: msg.text and (msg.text.lower().startswith("краш") or msg.text.lower().startswith("/crash")))
+async def start_crash(message: types.Message, state: FSMContext):
+    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines, GameStates.playing_gold, GameStates.playing_21]:
+        await message.answer("<b>❌ Завершите активную сессию в других играх!</b>")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 3:
+        await message.answer("<b>⚠️ Формат: <code>Краш [ставка] [икс]</code></b>\nПример: <code>краш 20к 2</code> или <code>краш все 1.5</code>")
+        return
+
+    user, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    bet = parse_amount(parts[1], user['balance'])
+
+    if bet <= 0:
+        await message.answer("<b>❌ Неверно указана сумма ставки!</b>")
+        return
+    if user['balance'] < bet:
+        await message.answer(f"<b>❌ Недостаточно средств! Баланс: {format_short_amount(user['balance'])} Ucoin</b>")
+        return
+
+    try:
+        target_x = float(parts[2].replace(",", "."))
+        if target_x <= 1.0: raise ValueError
+    except ValueError:
+        await message.answer("<b>❌ Коэффициент (икс) должен быть числом больше 1.0! Пример: 2 или 1.5</b>")
+        return
+
+    # Запускаем игровой процесс
+    await database.start_game_bet(message.from_user.id, bet)
+
+    # Генерация точки краша по математическому алгоритму
+    if random.random() < 0.12:  # 12% шанс мгновенного взрыва
+        crash_point = 1.0
+    else:
+        crash_point = round(1.01 / (random.uniform(0.01, 1.0)), 2)
+        if crash_point > 30.0: crash_point = round(random.uniform(5.0, 30.0), 2)
+
+    status_msg = await message.answer("🚀 <b>Ракета взлетает... Набираем высоту!</b>")
+    await asyncio.sleep(1)
+
+    # Симуляция анимации графика
+    animation_steps = [1.0]
+    if crash_point > 1.3: animation_steps.append(round(crash_point * 0.4, 2))
+    if crash_point > 1.7: animation_steps.append(round(crash_point * 0.7, 2))
+
+    for x_step in animation_steps:
+        if x_step >= target_x: break
+        try:
+            await status_msg.edit_text(f"🚀 <b>Ракета летит... 📈 Текущий множитель: {x_step:.2f}x</b>")
+            await asyncio.sleep(0.7)
+        except Exception: pass
+
+    # Сравнение результатов
+    if crash_point >= target_x:
+        win_amount = int(bet * target_x)
+        await database.win_game(message.from_user.id, win_amount)
+        await status_msg.edit_text(
+            f"<b>💰 РАКЕТА УСПЕШНО ДОЛЕТЕЛА! Победа!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 <b>Твой забор:</b> <code>{target_x}x</code>\n"
+            f"💥 <b>Взрыв ракеты:</b> {crash_point}x\n\n"
+            f"🎉 Ставка <b>{format_short_amount(bet)}</b> превратилась в <b>{format_short_amount(win_amount)} Ucoin!</b>"
+        )
+    else:
+        await database.lose_game(message.from_user.id, bet)
+        await status_msg.edit_text(
+            f"<b>💥 БУУУМ! РАКЕТА ВЗОРВАЛАСЬ! (КРАШ)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📉 <b>Вы ожидали:</b> <code>{target_x}x</code>\n"
+            f"💥 <b>Точка взрыва:</b> <b>{crash_point}x</b>\n\n"
+            f"❌ Вы потеряли ставку: <b>{format_short_amount(bet)} Ucoin</b>."
+        )
+
+
+# ================= НОВАЯ ИГРА: 21 ОЧКО (BLACKJACK) =================
+@dp.message(lambda msg: msg.text and (msg.text.lower().startswith("21") or msg.text.lower().startswith("/21")))
+async def start_game_21(message: types.Message, state: FSMContext):
+    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines, GameStates.playing_gold, GameStates.playing_21]:
+        await message.answer("<b>❌ Завершите вашу текущую игру!</b>")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("<b>⚠️ Формат: <code>21 [ставка]</code> (Пример: 21 5к или 21 все)</b>")
+        return
+
+    user, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    bet = parse_amount(parts[1], user['balance'])
+
+    if bet <= 0:
+        await message.answer("<b>❌ Некорректная сумма ставки!</b>")
+        return
+    if user['balance'] < bet:
+        await message.answer(f"<b>❌ Недостаточно средств! Баланс: {format_short_amount(user['balance'])} Ucoin</b>")
+        return
+
+    # Замораживаем ставку
+    await database.start_game_bet(message.from_user.id, bet)
+
+    # Стартовая раздача
+    p1_card, p1_val = get_random_card_21()
+    p2_card, p2_val = get_random_card_21()
+    d1_card, d1_val = get_random_card_21()
+
+    player_cards = [p1_card, p2_card]
+    player_score = p1_val + p2_val
+    dealer_cards = [d1_card]
+    dealer_score = d1_val
+
+    # Правило двух Тузов при раздаче (Золотое очко)
+    if p1_val == 11 and p2_val == 11:
+        player_score = 21
+
+    if player_score == 21:
+        win_amount = int(bet * 2)
+        await database.win_game(message.from_user.id, win_amount)
+        await message.answer(
+            f"<b>👑 ЗОЛОТОЕ ОЧКО! Сразу 21 очко при раздаче!</b>\n\n"
+            f"🃏 Твои карты: {', '.join(player_cards)}\n"
+            f"🎉 Автоматический выигрыш: <b>{format_short_amount(win_amount)} Ucoin!</b>"
+        )
+        return
+
+    # Сохраняем состояние
+    await state.set_state(GameStates.playing_21)
+    await state.update_data(bet=bet, player_cards=player_cards, player_score=player_score, dealer_cards=dealer_cards, dealer_score=dealer_score)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Еще карту", callback_data="blackjack_hit")
+    builder.button(text="🛑 Стоп", callback_data="blackjack_stop")
+    builder.adjust(2)
+
+    await message.answer(
+        f"<b>🃏 ИГРА: 21 ОЧКО (БЛЭКДЖЕК)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>Ставка:</b> {format_short_amount(bet)} Ucoin\n\n"
+        f"🫵 <b>Твои карты:</b> {', '.join(player_cards)} (<b>{player_score}</b> очков)\n"
+        f"🤖 <b>Карта дилера:</b> {', '.join(dealer_cards)} (<b>{dealer_score}</b> очков)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Сделайте следующий шаг:</i>",
+        reply_markup=builder.as_markup()
+    )
+
+@dp.callback_query(GameStates.playing_21, F.data == "blackjack_hit")
+async def blackjack_hit_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    bet = data['bet']
+    player_cards = data['player_cards']
+    player_score = data['player_score']
+    dealer_cards = data['dealer_cards']
+    dealer_score = data['dealer_score']
+
+    card, val = get_random_card_21()
+    player_cards.append(card)
+    player_score += val
+
+    await state.update_data(player_cards=player_cards, player_score=player_score)
+
+    if player_score > 21:
+        await database.lose_game(callback.from_user.id, bet)
+        await state.clear()
+        await callback.message.edit_text(
+            f"<b>💥 ПЕРЕБОР! У вас {player_score} очков.</b>\n"
+            f"🃏 Рука: {', '.join(player_cards)}\n\n"
+            f"❌ Сгорела ставка: <b>{format_short_amount(bet)} Ucoin</b>", reply_markup=None
+        )
+    elif player_score == 21:
+        win_amount = int(bet * 2)
+        await database.win_game(callback.from_user.id, win_amount)
+        await state.clear()
+        await callback.message.edit_text(
+            f"<b>👑 ОТЛИЧНО! Ровно 21 очко!</b>\n"
+            f"🃏 Рука: {', '.join(player_cards)}\n\n"
+            f"🎉 Твой выигрыш: <b>{format_short_amount(win_amount)} Ucoin</b>", reply_markup=None
+        )
+    else:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="➕ Еще карту", callback_data="blackjack_hit")
+        builder.button(text="🛑 Стоп", callback_data="blackjack_stop")
+        builder.adjust(2)
+
+        await callback.message.edit_text(
+            f"<b>🃏 ИГРА: 21 ОЧКО</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>Ставка:</b> {format_short_amount(bet)} Ucoin\n\n"
+            f"🫵 <b>Твои карты:</b> {', '.join(player_cards)} (<b>{player_score}</b> очков)\n"
+            f"🤖 <b>Карта дилера:</b> {', '.join(dealer_cards)} (<b>{dealer_score}</b> очков)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Берем еще или останавливаемся?</i>",
+            reply_markup=builder.as_markup()
+        )
+
+@dp.callback_query(GameStates.playing_21, F.data == "blackjack_stop")
+async def blackjack_stop_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    bet = data['bet']
+    player_cards = data['player_cards']
+    player_score = data['player_score']
+    dealer_cards = data['dealer_cards']
+    dealer_score = data['dealer_score']
+
+    # Логика добора дилера (добирает строго пока меньше 17 очков)
+    while dealer_score < 17:
+        card, val = get_random_card_21()
+        dealer_cards.append(card)
+        dealer_score += val
+
+    # Определение итогов игры
+    if dealer_score > 21:
+        win_amount = int(bet * 2)
+        await database.win_game(callback.from_user.id, win_amount)
+        result_text = f"<b>💰 ПОБЕДА! У Дилера перебор ({dealer_score} очков)!</b>\n🎉 Твой куш: <b>{format_short_amount(win_amount)} Ucoin</b>"
+    elif player_score > dealer_score:
+        win_amount = int(bet * 2)
+        await database.win_game(callback.from_user.id, win_amount)
+        result_text = f"<b>💰 ПОБЕДА ПО ОЧКАМ! ({player_score} против {dealer_score})</b>\n🎉 Твой куш: <b>{format_short_amount(win_amount)} Ucoin</b>"
+    elif player_score < dealer_score:
+        await database.lose_game(callback.from_user.id, bet)
+        result_text = f"<b>❌ ВЫ ПРОИГРАЛИ! У дилера больше очков ({dealer_score}).</b>\n📉 Потеряно: <b>{format_short_amount(bet)} Ucoin</b>"
+    else:
+        # Ничья — полный возврат замороженной ставки обратно
+        await database.win_game(callback.from_user.id, bet)
+        result_text = f"<b>🤝 НИЧЬЯ! Очки равны ({player_score} = {dealer_score}).</b>\n💵 Ставка {format_short_amount(bet)} вернулась на баланс."
+
+    await state.clear()
+    await callback.message.edit_text(
+        f"<b>🎌 ФИНАЛЬНЫЙ СЧЕТ 21 ОЧКО</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🫵 <b>Ваши очки:</b> {player_score} — Рука: {', '.join(player_cards)}\n"
+        f"🤖 <b>Очки дилера:</b> {dealer_score} — Рука: {', '.join(dealer_cards)}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{result_text}", reply_markup=None
+    )
+
+
 async def main():
     await database.init_db()
     
@@ -746,5 +996,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
