@@ -111,17 +111,14 @@ def parse_amount(text: str, current_balance: int) -> int:
         return current_balance
     
     text = text.replace(" ", "").replace(",", ".")
-    multiplier = 1
     
-    if "ккк" in text:
-        multiplier = 1_000_000_000
-        text = text.replace("ккк", "")
-    elif "кк" in text:
-        multiplier = 1_000_000
-        text = text.replace("кк", "")
-    elif "к" in text:
-        multiplier = 1_000
-        text = text.replace("к", "")
+    # Считаем количество букв 'к' (русских или английских) в конце строки
+    k_count = 0
+    while text.endswith('к') or text.endswith('k'):
+        k_count += 1
+        text = text[:-1]
+        
+    multiplier = 1000 ** k_count
         
     try:
         return int(float(text) * multiplier)
@@ -131,17 +128,29 @@ def parse_amount(text: str, current_balance: int) -> int:
 def format_short_amount(amount: int) -> str:
     is_negative = amount < 0
     abs_amount = abs(amount)
-    if abs_amount >= 1_000_000_000:
-        val = abs_amount / 1_000_000_000
-        res = f"{int(val) if val.is_integer() else round(val, 2)}ккк"
-    elif abs_amount >= 1_000_000:
-        val = abs_amount / 1_000_000
-        res = f"{int(val) if val.is_integer() else round(val, 2)}кк"
-    elif abs_amount >= 1_000:
-        val = abs_amount / 1_000
-        res = f"{int(val) if val.is_integer() else round(val, 2)}к"
-    else:
+    
+    if abs_amount == 0:
+        return "0"
+        
+    # Генерируем список суффиксов из повторяющихся 'к' с огромным запасом (до 20 уровней)
+    suffixes = [""] + ["к" * i for i in range(1, 21)]
+    
+    tier = 0
+    temp = abs_amount
+    
+    # Определяем разряд числа (тысячи, миллионы, миллиарды, триллионы...)
+    while temp >= 1000 and tier < len(suffixes) - 1:
+        temp //= 1000
+        tier += 1
+        
+    if tier == 0:
         res = str(abs_amount)
+    else:
+        divisor = 1000 ** tier
+        val = abs_amount / divisor
+        # Если число целое — выводим без точки, если дробное — округляем до 2 знаков
+        res = f"{int(val) if val.is_integer() else round(val, 2)}{suffixes[tier]}"
+        
     return f"-{res}" if is_negative else res
 
 def get_mines_multiplier(total_mines, opened_count):
