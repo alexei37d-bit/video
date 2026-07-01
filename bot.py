@@ -5,6 +5,7 @@ import random
 import time
 import logging
 import asyncio
+import html
 from decimal import Decimal, InvalidOperation
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command
@@ -247,12 +248,14 @@ def get_help_text():
         f"❌ <b>ОТМЕНА</b> — <b>Отменить созданную дуэль, пока никто не зашел</b>"
     )
 
-# --- СИСТЕМА ПЕРЕВОДОВ В ГРУППАХ ---
-@dp.message(F.chat.type.in_({"group", "supergroup"}), F.reply_to_message)
+# --- СИСТЕМА ПЕРЕВОДОВ В ГРУППАХ (ИСПРАВЛЕН ПЕРЕХВАТ РЕПЛАЕВ) ---
+@dp.message(
+    F.chat.type.in_({"group", "supergroup"}), 
+    F.reply_to_message,
+    lambda msg: msg.text and msg.text.lower().strip().startswith(("дать ", "/give "))
+)
 async def handle_group_transfer(message: types.Message):
     if message.reply_to_message.from_user.is_bot: return
-    text = message.text.lower().strip() if message.text else ""
-    if not (text.startswith("дать ") or text.startswith("/give ")): return
 
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2: return
@@ -272,8 +275,8 @@ async def handle_group_transfer(message: types.Message):
     await message.reply(
         f"<b>💸 ПЕРЕВОД ВЫПОЛНЕН!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 <b>Отправитель:</b> <b>{message.from_user.first_name}</b>\n"
-        f"👤 <b>Получатель:</b> <b>{message.reply_to_message.from_user.first_name}</b>\n"
+        f"👤 <b>Отправитель:</b> <b>{html.escape(message.from_user.first_name)}</b>\n"
+        f"👤 <b>Получатель:</b> <b>{html.escape(message.reply_to_message.from_user.first_name)}</b>\n"
         f"💰 <b>Сумма:</b> <b>{format_short_amount(amount)} Ucoin</b>"
     )
 
@@ -294,7 +297,7 @@ async def cmd_top_users(message: types.Message):
     for idx, user in enumerate(top_list, 1):
         name = user.get('full_name') or user.get('username') or 'Игрок'
         balance = user.get('balance', 0)
-        text += f"{idx}. <b>{name}</b> — <code>{format_short_amount(balance)}</code> Ucoin\n"
+        text += f"{idx}. <b>{html.escape(name)}</b> — <code>{format_short_amount(balance)}</code> Ucoin\n"
     
     await message.answer(text)
 
@@ -478,7 +481,7 @@ async def check_profile(message: types.Message):
     await message.answer(
         f"<b>👤 ЛИЧНЫЙ ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>📝 НИКНЕЙМ: {user['username'].upper()}</b>\n"
+        f"<b>📝 НИКНЕЙМ: {html.escape(user['username'].upper())}</b>\n"
         f"<b>🆔 ТВОЙ ID: <code>{user['user_id']}</code></b>\n\n"
         f"<b>💰 БАЛАНС: {format_short_amount(user['balance'])} Ucoin</b>\n"
         f"<b>🎮 СЫГРАНО ИГР: {user['games_played']}</b>\n"
@@ -976,7 +979,7 @@ async def create_duel_ttt(message: types.Message):
     sent_msg = await message.reply(
         f"⚔️ <b>PvP ДУЭЛЬ: КРЕСТИКИ-НОЛИКИ!</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 Ставка: <b>{format_short_amount(bet)} Ucoin</b>\n"
-        f"👤 Создатель: {message.from_user.first_name}\n\n"
+        f"👤 Создатель: {html.escape(message.from_user.first_name)}\n\n"
         f"<i>Ждем оппонента... Жми кнопку ниже!</i>",
         reply_markup=builder.as_markup()
     )
@@ -1028,11 +1031,11 @@ async def edit_ttt_board(message: types.Message, duel_id: int):
         builder.button(text=btn_text, callback_data=f"tt_turn_{i}_{duel_id}")
     builder.adjust(3)
 
-    cur_turn_name = duel['creator_name'] if duel['turn'] == duel['creator'] else duel['opponent_name']
+    cur_turn_name = html.escape(duel['creator_name']) if duel['turn'] == duel['creator'] else html.escape(duel['opponent_name'])
     await message.edit_text(
         f"❌⭕ <b>ИГРА: КРЕСТИКИ-НОЛИКИ</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 Ставка: <b>{format_short_amount(duel['bet'])} Ucoin</b>\n"
-        f"❌ <b>{duel['creator_name']}</b> vs ⭕ <b>{duel['opponent_name']}</b>\n\n"
+        f"❌ <b>{html.escape(duel['creator_name'])}</b> vs ⭕ <b>{html.escape(duel['opponent_name'])}</b>\n\n"
         f"👉 Сейчас ходит: <b>{cur_turn_name}</b>",
         reply_markup=builder.as_markup()
     )
@@ -1066,7 +1069,7 @@ async def process_ttt_turn(callback: types.CallbackQuery):
             await callback.message.edit_text(f"🤝 <b>НИЧЬЯ В КРЕСТИКИ-НОЛИКИ!</b>\nВсе клетки заполнены, коины возвращены игрокам.", reply_markup=None)
         else:
             winner_id = duel['creator'] if result == '❌' else duel['opponent']
-            winner_name = duel['creator_name'] if result == '❌' else duel['opponent_name']
+            winner_name = html.escape(duel['creator_name'] if result == '❌' else duel['opponent_name'])
             await database.win_game(winner_id, bet * 2)
             await callback.message.edit_text(f"🏆 <b>ПОБЕДА В ДУЭЛИ!</b>\n━━━━━━━━━━━━━━━━━━━━━━━\nИгрок <b>{winner_name}</b> выиграл <b>{format_short_amount(bet * 2)} Ucoin!</b>", reply_markup=None)
         DUELS.pop(duel_id, None)
@@ -1111,7 +1114,7 @@ async def create_duel_dice(message: types.Message):
     sent_msg = await message.reply(
         f"🎲 <b>PvP ДУЭЛЬ: КУБИКИ!</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 Ставка: <b>{format_short_amount(bet)} Ucoin</b>\n"
-        f"👤 Создатель: {message.from_user.first_name}\n\n"
+        f"👤 Создатель: {html.escape(message.from_user.first_name)}\n\n"
         f"💬 <b>ПРАВИЛА ИГРЫ:</b>\n"
         f"1. Оппонент жмет кнопку ниже для входа.\n"
         f"2. <b>ОБА</b> игрока делают бросок 🎲 (Reply кубиком) на это сообщение!\n"
@@ -1148,7 +1151,7 @@ async def join_duel_dice(callback: types.CallbackQuery):
     await callback.message.edit_text(
         f"🎲 <b>ДУЭЛЬ В КУБЫ (ИДЁТ СБОР БРОСКОВ)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 Ставка: {format_short_amount(duel['bet'])} Ucoin\n"
-        f"⚔️ Игроки: <b>{duel['creator_name']}</b> и <b>{duel['opponent_name']}</b>\n\n"
+        f"⚔️ Игроки: <b>{html.escape(duel['creator_name'])}</b> и <b>{html.escape(duel['opponent_name'])}</b>\n\n"
         f"👉 <b>ОБОИМ игрокам нужно отправить эмодзи 🎲 ответом (REPLY) на это сообщение!</b>",
         reply_markup=None
     )
@@ -1193,18 +1196,21 @@ async def handle_pvp_dice_rolls(message: types.Message):
         if found_duel_id not in DUELS: return
         c_score, o_score, bet = duel['creator_roll'], duel['opponent_roll'], duel['bet']
         
+        c_name = html.escape(duel['creator_name'])
+        o_name = html.escape(duel['opponent_name'])
+        
         if c_score > o_score:
             await database.win_game(duel['creator'], bet * 2)
-            res_text = f"🏆 В дуэли кубов побеждает <b>{duel['creator_name']}</b>! ({c_score} vs {o_score})\n🎉 Выигрыш: <b>{format_short_amount(bet * 2)} Ucoin</b>"
+            res_text = f"🏆 В дуэли кубов побеждает <b>{c_name}</b>! ({c_score} vs {o_score})\n🎉 Выигрыш: <b>{format_short_amount(bet * 2)} Ucoin</b>"
         elif o_score > c_score:
             await database.win_game(duel['opponent'], bet * 2)
-            res_text = f"🏆 В дуэли кубов побеждает <b>{duel['opponent_name']}</b>! ({o_score} vs {c_score})\n🎉 Выигрыш: <b>{format_short_amount(bet * 2)} Ucoin</b>"
+            res_text = f"🏆 В дуэли кубов побеждает <b>{o_name}</b>! ({o_score} vs {c_score})\n🎉 Выигрыш: <b>{format_short_amount(bet * 2)} Ucoin</b>"
         else:
             await database.win_game(duel['creator'], bet)
             await database.win_game(duel['opponent'], bet)
             res_text = f"🤝 <b>Ничья!</b> Выпало одинаково по <b>{c_score}</b>! Коины возвращены."
 
-        await message.bot.send_message(
+        await bot.send_message(
             chat_id=message.chat.id,
             text=f"📊 <b>ИТОГИ PvP ДУЭЛИ В КУБЫ:</b>\n━━━━━━━━━━━━━━━━━━━━━━\n{res_text}",
             reply_to_message_id=target_msg_id
@@ -1213,7 +1219,7 @@ async def handle_pvp_dice_rolls(message: types.Message):
 
 
 # =====================================================================
-# --- СИСТЕМА УМНОЙ ОТМЕНЫ ДУЭЛЕЙ (НОВАЯ ФУНКЦИЯ) ---
+# --- СИСТЕМА УМНОЙ ОТМЕНЫ ДУЭЛЕЙ ---
 # =====================================================================
 @dp.message(lambda msg: msg.text and msg.text.lower().strip() in ["отмена", "/отмена"])
 async def cancel_duel_handler(message: types.Message):
@@ -1254,10 +1260,10 @@ async def cancel_duel_handler(message: types.Message):
 
     if duel['message_id']:
         try:
-            await message.bot.edit_message_text(
+            await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=duel['message_id'],
-                text=f"❌ <b>Дуэль отменена создателем ({duel['creator_name']}).</b>\n💰 Ставка <b>{format_short_amount(duel['bet'])} Ucoin</b> возвращена на баланс.",
+                text=f"❌ <b>Дуэль отменена создателем ({html.escape(duel['creator_name'])}).</b>\n💰 Ставка <b>{format_short_amount(duel['bet'])} Ucoin</b> возвращена на баланс.",
                 reply_markup=None
             )
         except Exception: pass
