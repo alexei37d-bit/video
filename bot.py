@@ -4,7 +4,7 @@ import math
 import random
 import time
 import logging
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -29,9 +29,13 @@ TOWER_MULTIPLIERS = {
     4: [15.00, 120.00, 1100.00, 9500.00, 85000.00]
 }
 
+# Множители для игры Золото (удвоение на каждом из 10 шагов)
+GOLD_MULTIPLIERS = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+
 class GameStates(StatesGroup):
     playing_tower = State()
     playing_mines = State()
+    playing_gold = State()  # Новое состояние для игры Золото
 
 class AdminStates(StatesGroup):
     waiting_for_give_id = State()
@@ -42,7 +46,58 @@ class AdminStates(StatesGroup):
     waiting_for_promo_reward = State()
     waiting_for_promo_activations = State()
 
-# Конвертация букв в числа для базы данных (1.5кк -> 1500000)
+# --- МИДЛВАРЬ ДЛЯ КАТЕГОРИЧЕСКОЙ ПРОВЕРКИ ПОДПИСКИ ---
+class SubscriptionMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = event.from_user
+        if not user or user.id == ADMIN_ID:
+            return await handler(event, data)
+
+        if isinstance(event, types.Message) and event.chat.type != "private":
+            return await handler(event, data)
+        if isinstance(event, types.CallbackQuery) and event.message and event.message.chat.type != "private":
+            return await handler(event, data)
+
+        if isinstance(event, types.CallbackQuery) and event.data == "sub_check_btn":
+            return await handler(event, data)
+
+        bot_instance = data.get("bot")
+        is_subscribed = True
+
+        for channel in ["@Chat_ucoins", "@Ucoins_news"]:
+            try:
+                member = await bot_instance.get_chat_member(chat_id=channel, user_id=user.id)
+                if member.status in ["left", "kicked"]:
+                    is_subscribed = False
+                    break
+            except Exception:
+                is_subscribed = False
+                break
+
+        if not is_subscribed:
+            builder = InlineKeyboardBuilder()
+            builder.button(text="💬 Войти в чат", url="https://t.me/Chat_ucoins")
+            builder.button(text="📢 Наш канал", url="https://t.me/Ucoins_news")
+            builder.button(text="🔄 Проверить подписку", callback_data="sub_check_btn")
+            builder.adjust(1, 1, 1)
+
+            msg_text = (
+                "❌ <b>ДОСТУП ОГРАНИЧЕН!</b>\n\n"
+                "Чтобы использовать функции бота, вы обязательно должны быть подписаны на наши официальные ресурсы:\n\n"
+                "💬 <b>Чат общения:</b> @Chat_ucoins\n"
+                "📢 <b>Канал новостей:</b> @Ucoins_news\n\n"
+                "<i>Подпишитесь на оба ресурса и нажмите кнопку ниже!</i>"
+            )
+
+            if isinstance(event, types.Message):
+                await event.answer(msg_text, reply_markup=builder.as_markup())
+            elif isinstance(event, types.CallbackQuery):
+                await event.answer("⚠️ Доступ ограничен! Пожалуйста, подпишитесь на чат и канал.", show_alert=True)
+            return
+
+        return await handler(event, data)
+
+
 def parse_amount(text: str, current_balance: int) -> int:
     text = text.strip().lower()
     if text in ["все", "вб", "vse", "vb"]:
@@ -66,11 +121,9 @@ def parse_amount(text: str, current_balance: int) -> int:
     except ValueError:
         return -1
 
-# ТЕПЕРЬ ЭТО ОСНОВНОЙ ВЫВОД БАЛАНСА (Красиво сокращает: 800000000 -> 800кк)
 def format_short_amount(amount: int) -> str:
     is_negative = amount < 0
     abs_amount = abs(amount)
-    
     if abs_amount >= 1_000_000_000:
         val = abs_amount / 1_000_000_000
         res = f"{int(val) if val.is_integer() else round(val, 2)}ккк"
@@ -82,7 +135,6 @@ def format_short_amount(amount: int) -> str:
         res = f"{int(val) if val.is_integer() else round(val, 2)}к"
     else:
         res = str(abs_amount)
-        
     return f"-{res}" if is_negative else res
 
 def get_mines_multiplier(total_mines, opened_count):
@@ -109,6 +161,59 @@ def render_tower_text(current_level, bet, mines_count, next_win, current_win=0):
         f"💵 <b>Текущий куш:</b> <b>{format_short_amount(current_win)} Ucoin</b>\n"
         f"📈 <b>Следующий шаг:</b> <b>+{format_short_amount(next_win)} Ucoin</b>"
     )
+
+# Визуализация для новой игры Золото
+def render_gold_text(current_level, bet, next_win, current_win=0):
+    rows = []
+    for lvl in range(10, 0, -1):
+        if lvl > current_level: rows.append(f"<b>Уровень {lvl}: ⬜ ⬜</b>")
+        elif lvl == current_level: rows.append(f"<b>Уровень {lvl}: ❓ ❓  ◀️</b>")
+        else: rows.append(f"<b>Уровень {lvl}: 🟡 🟡 (Пройден)</b>")
+    return (
+        f"👑 <b>ИГРА: ЗОЛОТО НАЦИИ (10 Уровней)</b>\n\n" + "\n".join(rows) + "\n\n"
+        f"💰 <b>Ставка:</b> <b>{format_short_amount(bet)} Ucoin</b>\n"
+        f"💵 <b>Текущий куш:</b> <b>{format_short_amount(current_win)} Ucoin</b>\n"
+        f"📈 <b>Следующий шаг (x2):</b> <b>+{format_short_amount(next_win)} Ucoin</b>"
+    )
+
+# --- ОБРАБОТЧИК НАЖАТИЯ НА КНОПКУ «ПРОВЕРИТЬ ПОДПИСКУ» ---
+@dp.callback_query(F.data == "sub_check_btn")
+async def process_sub_check_callback(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    is_subscribed = True
+
+    for channel in ["@Chat_ucoins", "@Ucoins_news"]:
+        try:
+            member = await callback.bot.get_chat_member(chat_id=channel, user_id=user_id)
+            if member.status in ["left", "kicked"]:
+                is_subscribed = False
+                break
+        except Exception:
+            is_subscribed = False
+            break
+
+    if is_subscribed:
+        await callback.answer("✅ Подписка подтверждена! Доступ открыт.", show_alert=True)
+        await callback.message.delete()
+        
+        user, is_new = await database.get_or_create_user(callback.from_user.id, callback.from_user.full_name)
+        welcome_text = f"<b>🚀 С ВОЗВРАЩЕНИЕМ!</b>\n💰 Баланс: <b>{format_short_amount(user['balance'])} Ucoin</b>" if not is_new else f"<b>🚀 ПРИВЕТ! ТЕБЕ НАЧИСЛЕНО 1к СТАРТОВЫХ UCOIN!</b>"
+        
+        await callback.message.answer(
+            f"{welcome_text}\n\n"
+            f"<b>📋 ВСЕ НАШИ КОМАНДЫ:</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👉 <b>БАНК / БАЛАНС / Б</b> — <b>Баланс кошелька</b>\n"
+            f"👉 <b>ПРОФИЛЬ</b> — <b>Статистика аккаунта</b>\n"
+            f"👉 <b>БОНУС</b> — <b>Ежедневная халява (до 10кк)</b>\n"
+            f"👉 <b>ПРОМО [код]</b> — <b>Активировать промокод</b>\n"
+            f"👉 <b>ЗОЛОТО [ставка]</b> — <b>Золото 50/50 (10 этажей, умножение x2)</b> 🌟\n"
+            f"👉 <b>БАШНЯ [ставка] [мины]</b> — <b>Запустить Башню (мины от 1 до 4)</b>\n"
+            f"👉 <b>МИНЫ [ставка] [мины]</b> — <b>Запустить Мины 5х5 (мины от 1 до 24)</b>"
+        )
+    else:
+        await callback.answer("❌ Проверка не пройдена! Вы подписались не на все ресурсы.", show_alert=True)
+
 
 # --- СИСТЕМА ПЕРЕВОДОВ В ГРУППАХ ---
 @dp.message(F.chat.type.in_({"group", "supergroup"}), F.reply_to_message)
@@ -254,7 +359,7 @@ async def adm_give_amount(message: types.Message, state: FSMContext):
     data = await state.get_data()
     amount = parse_amount(message.text, 999_999_999_999)
     if amount <= 0:
-        await message.answer("Ошибка в сумме.")
+        await message.answer("Ошибка в изменении.")
         await state.clear()
         return
     success = await database.update_balance_admin(data['target_id'], amount)
@@ -306,6 +411,7 @@ async def cmd_start(message: types.Message):
         f"👉 <b>ПРОФИЛЬ</b> — <b>Статистика аккаунта</b>\n"
         f"👉 <b>БОНУС</b> — <b>Ежедневная халява (до 10кк)</b>\n"
         f"👉 <b>ПРОМО [код]</b> — <b>Активировать промокод</b>\n"
+        f"👉 <b>ЗОЛОТО [ставка]</b> — <b>Золото 50/50 (10 этажей, умножение x2)</b> 🌟\n"
         f"👉 <b>БАШНЯ [ставка] [мины]</b> — <b>Запустить Башню (мины от 1 до 4)</b>\n"
         f"👉 <b>МИНЫ [ставка] [мины]</b> — <b>Запустить Мины 5х5 (мины от 1 до 24)</b>"
     )
@@ -343,10 +449,99 @@ async def check_profile(message: types.Message):
         f"<b>📉 ВСЕГО ПРОИГРАНО: {format_short_amount(user['total_lost'])} Ucoin</b>"
     )
 
+# --- РЕЖИМ ЗОЛОТО (НОВЫЙ!) ---
+@dp.message(lambda msg: msg.text and msg.text.lower().startswith("золото"))
+async def start_gold(message: types.Message, state: FSMContext):
+    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines, GameStates.playing_gold]:
+        await message.answer("<b>❌ Завершите вашу прошлую игру!</b>")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("<b>⚠️ Формат: <code>Золото [ставка]</code> (Пример: Золото все или Золото 4кк)</b>")
+        return
+
+    user, _ = await database.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    bet = parse_amount(parts[1], user['balance'])
+
+    if bet <= 0:
+        await message.answer("<b>❌ Неверная сумма ставки!</b>")
+        return
+    if user['balance'] < bet:
+        await message.answer(f"<b>❌ Недостаточно средств для этой игры!</b>")
+        return
+
+    await database.start_game_bet(message.from_user.id, bet)
+    
+    # Генерируем мину для 1 уровня (0 или 1)
+    level_mine = random.randint(0, 1)
+    next_win = int(bet * GOLD_MULTIPLIERS[0])
+
+    await state.set_state(GameStates.playing_gold)
+    await state.update_data(bet=bet, current_level=1, level_mine=level_mine, accumulated_win=0)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📦 Ячейка 1", callback_data="gd_step_0")
+    builder.button(text="📦 Ячейка 2", callback_data="gd_step_1")
+    builder.adjust(2)
+
+    text = render_gold_text(current_level=1, bet=bet, next_win=next_win)
+    await message.answer(text, reply_markup=builder.as_markup())
+
+@dp.callback_query(GameStates.playing_gold, F.data.startswith("gd_step_"))
+async def gold_turn(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    bet, current_level, level_mine = data['bet'], data['current_level'], data['level_mine']
+    chosen_cell = int(callback.data.split("_")[2])
+
+    # Если игрок выбрал ячейку, где сгенерирована мина
+    if chosen_cell == level_mine:
+        await database.lose_game(callback.from_user.id, bet)
+        await state.clear()
+        await callback.message.edit_text(f"<b>💥 МИНА! Вы подорвались на {current_level}-м уровне Золота!</b>\n📉 Сгорело: {format_short_amount(bet)} Ucoin.", reply_markup=None)
+        return
+
+    # Рассчитываем текущий куш
+    current_win = int(bet * GOLD_MULTIPLIERS[current_level - 1])
+
+    # Если это был последний 10 уровень
+    if current_level == 10:
+        await database.win_game(callback.from_user.id, current_win)
+        await state.clear()
+        await callback.message.edit_text(f"<b>👑 НЕВЕРОЯТНО! ВЫ ПРОШЛИ ВСЕ 10 УРОВНЕЙ ЗОЛОТА! 🎉\n🏆 Выиграно: {format_short_amount(current_win)} Ucoin (x1024)!</b>", reply_markup=None)
+        return
+
+    # Иначе переводим на следующий уровень
+    next_level = current_level + 1
+    next_win = int(bet * GOLD_MULTIPLIERS[next_level - 1])
+    next_mine = random.randint(0, 1)
+
+    await state.update_data(current_level=next_level, level_mine=next_mine, accumulated_win=current_win)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📦 Ячейка 1", callback_data="gd_step_0")
+    builder.button(text="📦 Ячейка 2", callback_data="gd_step_1")
+    builder.button(text=f"💰 ЗАБРАТЬ {format_short_amount(current_win)} UCOIN", callback_data="gd_cashout")
+    builder.adjust(2, 1)
+
+    text = render_gold_text(current_level=next_level, bet=bet, next_win=next_win, current_win=current_win)
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+
+@dp.callback_query(GameStates.playing_gold, F.data == "gd_cashout")
+async def gold_cashout(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    win_sum = data.get('accumulated_win', 0)
+    await database.win_game(callback.from_user.id, win_sum)
+    await callback.message.edit_text(f"<b>💰 КЭШАУТ ЗОЛОТА! Забрано: {format_short_amount(win_sum)} Ucoin!</b>", reply_markup=None)
+    await state.clear()
+
+
 # --- РЕЖИМ МИНЫ ---
 @dp.message(lambda msg: msg.text and msg.text.lower().startswith("мины"))
 async def start_mines(message: types.Message, state: FSMContext):
-    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines]:
+    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines, GameStates.playing_gold]:
         await message.answer("<b>❌ Завершите прошлую игру!</b>")
         return
 
@@ -452,7 +647,7 @@ async def process_mines_cashout(callback: types.CallbackQuery, state: FSMContext
 # --- РЕЖИМ БАШНЯ ---
 @dp.message(lambda msg: msg.text and msg.text.lower().startswith("башня"))
 async def start_tower(message: types.Message, state: FSMContext):
-    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines]:
+    if await state.get_state() in [GameStates.playing_tower, GameStates.playing_mines, GameStates.playing_gold]:
         await message.answer("<b>❌ Завершите активную игру!</b>")
         return
 
@@ -538,6 +733,10 @@ async def tower_cashout(callback: types.CallbackQuery, state: FSMContext):
 
 async def main():
     await database.init_db()
+    
+    dp.message.outer_middleware(SubscriptionMiddleware())
+    dp.callback_query.outer_middleware(SubscriptionMiddleware())
+    
     await bot.set_my_commands([
         types.BotCommand(command="start", description="Главное меню"),
         types.BotCommand(command="balance", description="Мой баланс"),
